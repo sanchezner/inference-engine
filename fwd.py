@@ -5,6 +5,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 torch.manual_seed(0)
 tok = GPT2Tokenizer.from_pretrained("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
+model.config._attn_implementation = "eager"
 
 prompt = "The capital of France is"
 ids = tok(prompt, return_tensors="pt").input_ids
@@ -60,7 +61,6 @@ def attention(x, c_attn_w, c_attn_b, c_proj_w, c_proj_b, n_heads=12):
     return merged @ c_proj_w + c_proj_b, weights
 
 
-model.config._attn_implementation = "eager"
 block = model.transformer.h[0]
 x_hat = layer_norm(x, block.ln_1.weight, block.ln_1.bias)
 delta, weights = attention(x_hat, block.attn.c_attn.weight, block.attn.c_attn.bias, block.attn.c_proj.weight, block.attn.c_proj.bias)
@@ -85,24 +85,38 @@ def mlp(x, c_fc_w, c_fc_b, c_proj_w, c_proj_b):
     return hidden @ c_proj_w + c_proj_b
 
 
-x += delta
-h = layer_norm(x, block.ln_2.weight, block.ln_2.bias)
-mlp_delta = mlp(h, block.mlp.c_fc.weight, block.mlp.c_fc.bias, block.mlp.c_proj.weight, block.mlp.c_proj.bias)
-x += mlp_delta
-print("block0_max_abs_err", (x - out.hidden_states[1]).abs().max().item()) 
+def forward(ids):
+    pos = torch.arange(ids.shape[1])
+    x = wte[ids] + wpe[pos]
+    
+    for block in model.transformer.h:
+        x_hat = layer_norm(x, block.ln_1.weight, block.ln_1.bias)
+        delta, _ = attention(x_hat, block.attn.c_attn.weight, block.attn.c_attn.bias, block.attn.c_proj.weight, block.attn.c_proj.bias)
+        x += delta
+        h = layer_norm(x, block.ln_2.weight, block.ln_2.bias)
+        mlp_delta = mlp(h, block.mlp.c_fc.weight, block.mlp.c_fc.bias, block.mlp.c_proj.weight, block.mlp.c_proj.bias)
+        x += mlp_delta
+    
+    x = layer_norm(x, model.transformer.ln_f.weight, model.transformer.ln_f.bias)
 
-for block in model.transformer.h[1:]:
-    x_hat = layer_norm(x, block.ln_1.weight, block.ln_1.bias)
-    delta, _ = attention(x_hat, block.attn.c_attn.weight, block.attn.c_attn.bias, block.attn.c_proj.weight, block.attn.c_proj.bias)
-    x += delta
-    h = layer_norm(x, block.ln_2.weight, block.ln_2.bias)
-    x += mlp(h, block.mlp.c_fc.weight, block.mlp.c_fc.bias, block.mlp.c_proj.weight, block.mlp.c_proj.bias)
+    return x[0, -1] @ wte.T
 
-x = layer_norm(x, model.transformer.ln_f.weight, model.transformer.ln_f.bias)
-print("final_ln_max_abs_err", (x - out.hidden_states[-1]).abs().max().item())
 
-my_logits = x[0, -1] @ wte.T
+def generate(ids, max_new_tokens, eos_id):
+    for _ in range(max_new_tokens):
+        next_id = torch.argmax(forward(ids))
+        ids = torch.cat([ids, next_id.view(1, 1)], dim=1)
+        if next_id.item() == eos_id:
+            break
+
+    return ids
+
+
+with torch.no_grad():
+    my_logits = forward(ids)
+    mine = generate(ids, max_new_tokens=10, eos_id=model.config.eos_token_id)
+    ref = model.generate(ids, max_new_tokens=10, do_sample=False, pad_token_id=model.config.eos_token_id)
+
 print("logit_max_abs_err", (my_logits - logits).abs().max().item())
-values, indices = torch.topk(my_logits, k=5)
-for v, i in zip(values.tolist(), indices.tolist()):
-    print(f"{v: .4f} {tok.decode([i])!r}")
+print(torch.equal(mine, ref))
+print(tok.decode(mine[0]))
