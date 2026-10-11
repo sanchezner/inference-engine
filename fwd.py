@@ -1,6 +1,7 @@
 import torch
 import math
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+import time
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoTokenizer, AutoModelForCausalLM
 
 torch.manual_seed(0)
 tok = GPT2Tokenizer.from_pretrained("gpt2")
@@ -102,9 +103,144 @@ def forward(ids):
     return x[0, -1] @ wte.T
 
 
-def generate(ids, max_new_tokens, eos_id):
+def rms_norm(x, weight, eps):
+    variance = x.pow(2).mean(dim=-1, keepdim=True)
+    return weight * x * torch.rsqrt(variance + eps)
+
+
+def rotate_half(x):
+    half = x.shape[-1] // 2
+    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+def rope_cos_sin(position_ids, head_dim, theta):
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    freqs = position_ids.float()[..., None] * inv_freq
+    emb = torch.cat((freqs, freqs), dim=-1)
+
+    return emb.cos(), emb.sin()
+
+
+def apply_rope(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    q = q * cos + rotate_half(q) * sin
+    k = k * cos + rotate_half(k) * sin
+
+    return q, k
+
+
+def repeat_kv(x, n_rep):
+    if n_rep == 1:
+        return x
+
+    B, n_kv, T, D = x.shape
+    x = x[:, :, None, :, :].expand(B, n_kv, n_rep, T, D)
+    return x.reshape(B, n_kv * n_rep, T, D)
+
+
+def  llama_attention(x, q_w, k_w, v_w, o_w, n_heads, n_kv_heads, cos, sin):
+    B, T, _ = x.shape
+    head_dim = q_w.shape[0] // n_heads
+    q = (x @ q_w.T).view(B, T, n_heads, head_dim).transpose(1, 2)
+    k = (x @ k_w.T).view(B, T, n_kv_heads, head_dim).transpose(1, 2)
+    v = (x @ v_w.T).view(B, T, n_kv_heads, head_dim).transpose(1, 2)
+
+    q, k = apply_rope(q, k, cos, sin)
+
+    k = repeat_kv(k, n_heads // n_kv_heads)
+    v = repeat_kv(v, n_heads // n_kv_heads)
+
+    scores = (q @ k.transpose(-1, -2)) * (head_dim ** -0.5)
+    future = torch.triu(torch.ones(T, T, dtype=torch.bool), diagonal=1)
+    scores = scores.masked_fill(future, torch.finfo(scores.dtype).min)
+    weights = torch.softmax(scores, dim=-1)
+    merged = (weights @ v).transpose(1, 2).contiguous().view(B, T, -1)
+
+    return merged @ o_w.T
+
+
+def llama_mlp(x, gate_w, up_w, down_w):
+    hidden = torch.nn.functional.silu(x @ gate_w.T) * (x @ up_w.T)
+    return hidden @ down_w.T
+
+    
+def forward_llama(ids):
+    cfg = llama.config
+    x = llama.model.embed_tokens(ids)
+    pos = torch.arange(ids.shape[1]).unsqueeze(0)
+    cos, sin = rope_cos_sin(pos, cfg.head_dim, cfg.rope_parameters["rope_theta"])
+
+    for layer in llama.model.layers:
+        h = rms_norm(x, layer.input_layernorm.weight, cfg.rms_norm_eps)
+        llama_attn_delta = llama_attention(h, layer.self_attn.q_proj.weight, layer.self_attn.k_proj.weight, layer.self_attn.v_proj.weight, layer.self_attn.o_proj.weight, cfg.num_attention_heads, cfg.num_key_value_heads, cos, sin)
+        x += llama_attn_delta
+        h = rms_norm(x, layer.post_attention_layernorm.weight, cfg.rms_norm_eps)
+        x += llama_mlp(h, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, layer.mlp.down_proj.weight)
+    
+    x = rms_norm(x, llama.model.norm.weight, cfg.rms_norm_eps)
+
+    return x[0, -1] @ llama.lm_head.weight.T
+        
+
+def llama_attention_cached(x, q_w, k_w, v_w, o_w, n_heads, n_kv_heads, cos, sin, past_k, past_v):
+    B, T, _ = x.shape
+    head_dim = q_w.shape[0] // n_heads
+    q = (x @ q_w.T).view(B, T, n_heads, head_dim).transpose(1, 2)
+    k = (x @ k_w.T).view(B, T, n_kv_heads, head_dim).transpose(1, 2)
+    v = (x @ v_w.T).view(B, T, n_kv_heads, head_dim).transpose(1, 2)
+
+    q, k = apply_rope(q, k, cos, sin)
+
+    if past_k is not None:
+        k = torch.cat([past_k, k], dim=2)
+        v = torch.cat([past_v, v], dim=2)
+
+    k_cache, v_cache = k, v
+    k = repeat_kv(k, n_heads // n_kv_heads)
+    v = repeat_kv(v, n_heads // n_kv_heads)
+
+    scores = (q @k.transpose(-1, -2)) * (head_dim ** -0.5)
+    T_k = k.shape[2]
+    q_idx = torch.arange(T)[:, None]
+    k_idx = torch.arange(T_k)[None, :]
+    future = k_idx > (T_k - T) + q_idx
+    scores = scores.masked_fill(future, torch.finfo(scores.dtype).min)
+    weights = torch.softmax(scores, dim=-1)
+    merged = (weights @ v).transpose(1, 2).contiguous().view(B, T, -1)
+
+    return merged @ o_w.T, k_cache, v_cache
+
+
+def forward_llama_cached(ids, cache):
+    cfg = llama.config
+    past = 0 if len(cache) == 0 else cache[0][0].shape[2]
+    new_ids = ids[:, past:]
+    x = llama.model.embed_tokens(new_ids)
+    pos = torch.arange(past, past + new_ids.shape[1]).unsqueeze(0)
+    cos, sin = rope_cos_sin(pos, cfg.head_dim, cfg.rope_parameters["rope_theta"])
+
+    new_cache = []
+    for i, layer in enumerate(llama.model.layers):
+        h = rms_norm(x, layer.input_layernorm.weight, cfg.rms_norm_eps)
+        past_k, past_v = (None, None) if len(cache) == 0 else cache[i]
+        delta, k, v = llama_attention_cached(h, layer.self_attn.q_proj.weight, layer.self_attn.k_proj.weight, layer.self_attn.v_proj.weight, layer.self_attn.o_proj.weight, cfg.num_attention_heads, cfg.num_key_value_heads, cos, sin, past_k, past_v)
+        new_cache.append((k, v))
+        x += delta
+        h = rms_norm(x, layer.post_attention_layernorm.weight, cfg.rms_norm_eps)
+        x += llama_mlp(h, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, layer.mlp.down_proj.weight)
+
+    x = rms_norm(x, llama.model.norm.weight, cfg.rms_norm_eps)
+    return x[0, -1] @ llama.lm_head.weight.T, new_cache
+
+
+def generate(forward_fn, ids, max_new_tokens, eos_id, cache=None):
     for _ in range(max_new_tokens):
-        next_id = torch.argmax(forward(ids))
+        if cache is None:
+            logits = forward_fn(ids)
+        else:
+            logits, cache = forward_fn(ids, cache)
+    
+        next_id = torch.argmax(logits)
         ids = torch.cat([ids, next_id.view(1, 1)], dim=1)
         if next_id.item() == eos_id:
             break
@@ -114,9 +250,47 @@ def generate(ids, max_new_tokens, eos_id):
 
 with torch.no_grad():
     my_logits = forward(ids)
-    mine = generate(ids, max_new_tokens=10, eos_id=model.config.eos_token_id)
+    mine = generate(forward, ids, max_new_tokens=10, eos_id=model.config.eos_token_id)
     ref = model.generate(ids, max_new_tokens=10, do_sample=False, pad_token_id=model.config.eos_token_id)
 
 print("logit_max_abs_err", (my_logits - logits).abs().max().item())
 print(torch.equal(mine, ref))
 print(tok.decode(mine[0]))
+
+llama_name = "HuggingFaceTB/SmolLM2-135M"
+llama_tok = AutoTokenizer.from_pretrained(llama_name)
+llama = AutoModelForCausalLM.from_pretrained(llama_name, dtype=torch.float32).eval()
+llama.config._attn_implementation = "eager"
+print(llama.config.rope_parameters)
+
+llama_ids = llama_tok(prompt, return_tensors="pt").input_ids
+
+with torch.no_grad():
+    ref_logits = llama(llama_ids).logits[0, -1]
+    my_llama_logits = forward_llama(llama_ids)
+    mine = generate(forward_llama, llama_ids, max_new_tokens=10, eos_id=llama.config.eos_token_id)
+    ref_ids = llama.generate(llama_ids, max_new_tokens=10, do_sample=False, pad_token_id=llama.config.eos_token_id)
+
+print("llama_logit_max_abs_err", (my_llama_logits - ref_logits).abs().max().item())
+print(torch.equal(mine, ref_ids))
+print(llama_tok.decode(mine[0]))
+
+eos = llama.config.eos_token_id
+with torch.no_grad():
+    prefill_logits, prefill_cache = forward_llama_cached(llama_ids, [])
+    print("prefill_logit_max_abs_err", (prefill_logits - my_llama_logits).abs().max().item())
+    print("cache_k_shape", tuple(prefill_cache[0][0].shape), "layers", len(prefill_cache))
+
+    generate(forward_llama_cached, llama_ids, max_new_tokens=10, eos_id=eos, cache=[])
+
+    t0 = time.perf_counter()
+    uncached_ids = generate(forward_llama, llama_ids, max_new_tokens=10, eos_id=eos)
+    uncached_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    cached_ids = generate(forward_llama_cached, llama_ids, max_new_tokens=10, eos_id=eos, cache=[])
+    cached_s = time.perf_counter() - t0
+
+print(torch.equal(cached_ids, ref_ids))
+print(torch.equal(cached_ids, uncached_ids))
+print("uncached_s", uncached_s, "cached_s", cached_s)
