@@ -6,10 +6,10 @@ A from-scratch inference runtime I'm building to get a deeper understanding of i
 
 ## log:
 
-**2026-10-12 ~ A cache, then a batch** [[blog post](https://sanchezner.com/2026/10/12/a-cache-then-a-batch)]
+**<u>2026-10-12</u> ~ A cache, then a batch** [[blog post](https://sanchezner.com/2026/10/12/a-cache-then-a-batch)]
 
 The GPT-2 forward now sits in a greedy loop that rescores the whole sequence every token, matching Hugging Face for 10 tokens, and the same prompt runs on SmolLM2-135M with RMSNorm, RoPE, grouped-query attention, and a SwiGLU MLP. A KV cache scores only the new token. Four prompts share that forward, mixed lengths are left-padded, and a continuous batch drops a finished row and admits the next request into the free slot.
 
-**2026-10-03 ~ Forward pass matches the oracle** [[blog post](https://sanchezner.com/2026/10/03/a-naive-forward-pass)]
+**<u>2026-10-03</u> ~ Forward pass matches the oracle** [[blog post](https://sanchezner.com/2026/10/03/a-naive-forward-pass)]
 
 Wrote the GPT-2-small forward pass and checked it against the Hugging Face `gpt2` checkpoint on "The capital of France is". Token and position embeddings feed 12 pre-norm blocks, each doing causal attention and a tanh-GELU MLP, and the last position is multiplied by the tied token embedding to score the next token.
