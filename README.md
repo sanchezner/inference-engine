@@ -8,10 +8,7 @@ A from-scratch inference runtime I'm building to get a deeper understanding of i
 
 **<ins>2026-10-20</ins> ~ Checks can fail + refactor**
 
-The printed comparisons are assertions now. `make check` runs the GPT-2 forward, the dense cache, static and continuous batching, and the page pool, and it fails if a logit drifts past the recorded tolerance or if a retired sequence does not return its pages. GPT-2 and the dense-cache batcher moved to `engine/legacy/` and stay there as the ablation baseline. `make bringup` records that this WSL2 box has an RTX 3070 visible to PyTorch and that Nsight is not installed.
-
-
-The printed comparisons are assertions now. `make check` runs the GPT-2 forward, the dense cache, the static and continuous batches, and the page pool, and it fails if a logit drifts past the recorded tolerance or if a retired sequence does not hand its pages back. GPT-2 and the dense-cache batcher was moved to `engine/legacy/` and stay there as the ablation baseline. Moved to WSL2 w/ an RTX 3070; Nsight is not installed, and a one-add Triton kernel does not compile until a C compiler exists. CPU timings for that run are in `bench/results/2026-10-20-m0-cpu.json`.
+The printed comparisons are assertions now. `make check` runs the GPT-2 forward, the dense cache, static and continuous batching, and the page pool, and it fails if a logit drifts past the recorded tolerance or if a retired sequence doesn't return its pages. GPT-2 and the dense-cache batcher were moved to `engine/legacy/` and stay there as the ablation baseline.
 
 **<ins>2026-10-15</ins> ~ A pool of pages** [[blog post](https://sanchezner.com/2026/10/15/a-pool-of-pages)]
 
