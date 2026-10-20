@@ -1,7 +1,7 @@
 import torch
 
 
-# helper functino that pads input sequences with pad_id on the left instead of the right
+# helper function that pads input sequences with pad_id on the left instead of the right
 # autoregressive generation appens new tokesn to the right; if right padding was used, new tkoens would sit in the middle, breaking position indices
 # left padding keeps active generation heads aligned at the very last column index (-1)
 def left_pad(rows, pad_id):
