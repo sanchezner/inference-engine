@@ -6,7 +6,7 @@ from engine.paged import new_sequence, release_pages
 def admit_paged(forward_one, pool, req, outputs, eos_id):
     seq = new_sequence(pool)
     logits, seq = forward_one(req["prompt"].view(1, -1), seq)
-    tok = torch.argmax(logits, dim=-1)[0]
+    tok = torch.argmax(logits, dim=-1)[0].to(device=req["prompt"].device)
     ids = torch.cat([req["prompt"], tok.view(1)])
 
     if tok.item() == eos_id or req["budget"] == 1:
@@ -44,7 +44,7 @@ def generate_continuous_paged(forward_one, forward_batch, pool, prompts, budgets
         alive = []
 
         for i, slot in enumerate(slots):
-            tok = next_id[i]
+            tok = next_id[i].to(device=slot["ids"].device)
             slot["ids"] = torch.cat([slot["ids"], tok.view(1)])
             slot["generated"] += 1
 

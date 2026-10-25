@@ -9,7 +9,9 @@ def generate(forward_fn, ids, max_new_tokens, eos_id, cache=None):
         else:
             logits, cache = forward_fn(ids, cache)
     
-        next_id = torch.argmax(logits)
+        # The token stream stays on the caller's device. The forward may have
+        # run on CUDA; concatenating a CUDA id onto CPU prompt ids would throw.
+        next_id = torch.argmax(logits, dim=-1).to(device=ids.device)
         ids = torch.cat([ids, next_id.view(1, 1)], dim=1)
         if next_id.item() == eos_id:
             break

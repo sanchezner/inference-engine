@@ -35,7 +35,7 @@ def admit_into_batch(forward_fn, slots, incoming, outputs, eos_id):
             continue
 
         n_left = (width - prompt.shape[0]) + align
-        filler = torch.full((n_left,), eos_id, dtype=prompt.dtype)
+        filler = torch.full((n_left,), eos_id, dtype=prompt.dtype, device=prompt.device)
         accepted.append({
             "index": req["index"],
             "ids": torch.cat([filler, prompt, tok.view(1)]),
