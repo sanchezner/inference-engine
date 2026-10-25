@@ -1,8 +1,7 @@
 import time
 import torch
 from functools import partial
-from engine.load import load_smollm
-from engine.llama import forward_llama
+from checks.oracle import load_smollm
 from engine.legacy.llama import forward_llama_cached
 from engine.legacy.cache import left_pad
 from engine.generate import generate
@@ -21,14 +20,13 @@ def _equal_rows(batched, serial_ids, pad_lens=None):
 def main():
     torch.manual_seed(0)
     llama_tok, llama = load_smollm()
-    uncached = partial(forward_llama, llama)
     cached = partial(forward_llama_cached, llama)
     llama_ids = llama_tok("The capital of France is", return_tensors="pt").input_ids
     eos = llama.config.eos_token_id
     timings = {}
 
     with torch.no_grad():
-        my_llama_logits = uncached(llama_ids)
+        my_llama_logits = llama(llama_ids).logits[0, -1]
 
         prompts = [
             "The capital of France is",
@@ -58,7 +56,7 @@ def main():
         )]
         mixed_ids, pad_lens = left_pad(mixed_rows, eos)
         prefill_m, _ = cached(mixed_ids, [], pad_lens)
-        cat_logits = uncached(mixed_rows[2].view(1, -1))
+        cat_logits = llama(mixed_rows[2].view(1, -1)).logits[0, -1]
         assert_logits("france_pad", prefill_m[0], my_llama_logits, LLAMA_LOGIT_ATOL)
         assert_logits("cat_pad", prefill_m[2], cat_logits, LLAMA_LOGIT_ATOL)
 

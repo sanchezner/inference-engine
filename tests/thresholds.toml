@@ -1,0 +1,11 @@
+# cuda-bf16, SmolLM2-135M, RTX 3070, WSL2, torch 2.14.1+cu132, 2026-10-24.
+# Oracle is Hugging Face eager fp32 on the same GPU. KL is the mean over the
+# six prompts in checks/agreement.py, scored at the last prompt position.
+# Top-1 is teacher-forced agreement on the first 10 greedy oracle tokens
+# (60 positions). Measured: uncached KL 1.880e-3, top-1 0.950;
+# paged KL 1.880e-3, top-1 0.933. The caps sit a few times above that noise.
+# A broken attention or norm lands near KL 1e-1 and a much lower top-1.
+
+[cuda-bf16]
+mean_kl_max = 5.0e-3
+top1_min = 0.90
