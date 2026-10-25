@@ -6,6 +6,10 @@ A from-scratch inference runtime I'm building to get a deeper understanding of i
 
 ## log:
 
+**<ins>2026-10-24</ins> ~ Off the Hugging Face module**
+
+The Llama runtime loads its own config and safetensors and no longer reads a Hugging Face module. The uncached forward and the page pool run on CPU fp32, CUDA fp32, and CUDA bf16 on the RTX 3070. fp32 greedy output matches Hugging Face, including the out-of-order block table `[4, 5, 1]`. bf16 is scored by KL and teacher-forced top-1, and the first measured limits are frozen in `tests/thresholds.toml`. Page state is a `PagePool` and a `Sequence`. The dense cache stays in `engine/legacy/` as the CPU ablation.
+
 **<ins>2026-10-20</ins> ~ Checks can fail + refactor**
 
 The printed comparisons are assertions now. `make check` runs the GPT-2 forward, the dense cache, static and continuous batching, and the page pool, and it fails if a logit drifts past the recorded tolerance or if a retired sequence doesn't return its pages. GPT-2 and the dense-cache batcher were moved to `engine/legacy/` and stay there as the ablation baseline.
