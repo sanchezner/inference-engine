@@ -12,6 +12,7 @@ check:
 	$(PY) checks/cache.py
 	$(PY) checks/batch.py
 	$(PY) checks/paged.py
+	$(PY) checks/scale.py
 
 bringup:
 	$(PY) bench/bringup.py
