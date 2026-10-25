@@ -6,6 +6,8 @@ export TQDM_DISABLE := 1
 .PHONY: check bringup
 
 check:
+	$(PY) checks/config.py
+	$(PY) checks/weights.py
 	$(PY) checks/forward.py
 	$(PY) checks/cache.py
 	$(PY) checks/batch.py
