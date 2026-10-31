@@ -1,0 +1,591 @@
+{
+  "milestone": "M2",
+  "part": "bandwidth-and-roofline",
+  "date": "2026-10-25",
+  "host": "WSL2",
+  "command": "make bench-bandwidth",
+  "methodology": "Device-to-device copy of a 1 GiB buffer, timed with CUDA events. Bytes moved per copy are 2 * buffer (one read and one write), which is what the spec-sheet GB/s number counts. Each sample times 100 back-to-back copies, because a single copy is short enough for the memory clock to drop and this RTX 3070 is also driving the display. One untimed sample warms up, then ten timed samples; the ceiling uses the median. Clocks are read while a copy series is queued, and once more immediately after the last sample. That second read can still see boost; the idle clock is the sample taken before any copy. Clocks are not locked. The decode ceiling is batch * bandwidth / step_bytes, where a step reads every streamed weight once, one embedding row per sequence, and the live KV of every sequence (K and V, context includes the new token). Activations are not in the byte count. The 1.7B fp32 ceiling is arithmetic only: those weights are about 6.8 GB and do not fit beside a CUDA context on this 8 GB card. Host is WSL2.",
+  "environment": {
+    "host": "WSL2",
+    "python": "3.14.4",
+    "torch": "2.14.1+cu132",
+    "triton": "3.8.0",
+    "cuda_build": "13.2",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3070",
+    "gpu_total_bytes": 8589279232,
+    "sm_count": 46,
+    "nsight_systems": true,
+    "nsight_compute": true,
+    "nvidia_smi": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P8",
+      "clocks.sm": "210",
+      "clocks.mem": "405",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "18.98",
+      "utilization.gpu": "28"
+    },
+    "compute_apps": {
+      "ok": true,
+      "apps": []
+    },
+    "git": {
+      "ok": true,
+      "sha": "76109a9bbacfa570143828b5dc54d9980ecbe6a6",
+      "dirty": true
+    }
+  },
+  "nvidia_smi_after": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1995",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "127.80",
+    "utilization.gpu": "100"
+  },
+  "bandwidth": {
+    "method": "device-to-device copy; bytes = 2 * buffer * copies (read + write)",
+    "buffer_bytes": 1073741824,
+    "copies_per_sample": 100,
+    "warmup_samples": 1,
+    "repetitions": 10,
+    "nvidia_smi_under_load": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P2",
+      "clocks.sm": "1980",
+      "clocks.mem": "6801",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "80.29",
+      "utilization.gpu": "100"
+    },
+    "samples_bytes_per_s": [
+      367980782126.9324,
+      367581118340.2693,
+      366944859554.9881,
+      368520103152.194,
+      367526403290.4881,
+      368115146598.2561,
+      365894851567.7083,
+      367370410882.0013,
+      366448526929.07837,
+      367832363812.63666
+    ],
+    "median_bytes_per_s": 367553760815.37866,
+    "min_bytes_per_s": 365894851567.7083,
+    "max_bytes_per_s": 368520103152.194,
+    "median_gbps": 367.55376081537867,
+    "min_gbps": 365.8948515677083,
+    "max_gbps": 368.520103152194,
+    "fraction_of_spec": 0.8204325018200417,
+    "spec_gbps_stock_3070": 448,
+    "spec_note": "Stock RTX 3070 is ~448 GB/s. A 3070 Ti is ~608 GB/s; the device name above decides which."
+  },
+  "roofline": {
+    "formula": "tokens_per_s = batch * median_bytes_per_s / step_bytes",
+    "step_bytes": "streamed weights + batch * hidden * dtype_bytes + batch * context * kv_bytes_per_token",
+    "kv_bytes_per_token": "2 * n_layers * n_kv_heads * head_dim * dtype_bytes",
+    "activations_included": false,
+    "models": {
+      "HuggingFaceTB/SmolLM2-135M": {
+        "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+        "parameter_elements": 134515008,
+        "tie_word_embeddings": true,
+        "n_layers": 30,
+        "n_heads": 9,
+        "n_kv_heads": 3,
+        "head_dim": 64,
+        "dtypes": {
+          "bf16": {
+            "dtype_bytes": 2,
+            "streamed_weight_bytes": 269030016,
+            "streamed_weight_gib": 0.2505537271499634,
+            "kv_bytes_per_token": 23040,
+            "ceilings": [
+              {
+                "batch": 1,
+                "context": 128,
+                "step_bytes": 271980288,
+                "tokens_per_s": 1351.3985278792654
+              },
+              {
+                "batch": 1,
+                "context": 512,
+                "step_bytes": 280827648,
+                "tokens_per_s": 1308.8232709030794
+              },
+              {
+                "batch": 1,
+                "context": 2048,
+                "step_bytes": 316217088,
+                "tokens_per_s": 1162.34629551512
+              },
+              {
+                "batch": 2,
+                "context": 128,
+                "step_bytes": 274930560,
+                "tokens_per_s": 2673.793417620643
+              },
+              {
+                "batch": 2,
+                "context": 512,
+                "step_bytes": 292625280,
+                "tokens_per_s": 2512.1121511810506
+              },
+              {
+                "batch": 2,
+                "context": 2048,
+                "step_bytes": 363404160,
+                "tokens_per_s": 2022.8373875267616
+              },
+              {
+                "batch": 4,
+                "context": 128,
+                "step_bytes": 280831104,
+                "tokens_per_s": 5235.22865637246
+              },
+              {
+                "batch": 4,
+                "context": 512,
+                "step_bytes": 316220544,
+                "tokens_per_s": 4649.334368552331
+              },
+              {
+                "batch": 4,
+                "context": 2048,
+                "step_bytes": 457778304,
+                "tokens_per_s": 3211.631111424439
+              },
+              {
+                "batch": 8,
+                "context": 128,
+                "step_bytes": 292632192,
+                "tokens_per_s": 10048.21125941957
+              },
+              {
+                "batch": 8,
+                "context": 512,
+                "step_bytes": 363411072,
+                "tokens_per_s": 8091.195654388398
+              },
+              {
+                "batch": 8,
+                "context": 2048,
+                "step_bytes": 646526592,
+                "tokens_per_s": 4548.0419876109745
+              },
+              {
+                "batch": 16,
+                "context": 128,
+                "step_bytes": 316234368,
+                "tokens_per_s": 18596.524502504606
+              },
+              {
+                "batch": 16,
+                "context": 512,
+                "step_bytes": 457792128,
+                "tokens_per_s": 12846.136517764802
+              },
+              {
+                "batch": 16,
+                "context": 2048,
+                "step_bytes": 1024023168,
+                "tokens_per_s": 5742.897579682552
+              },
+              {
+                "batch": 32,
+                "context": 128,
+                "step_bytes": 363438720,
+                "tokens_per_s": 32362.320520202462
+              },
+              {
+                "batch": 32,
+                "context": 512,
+                "step_bytes": 646554240,
+                "tokens_per_s": 18191.390015618977
+              },
+              {
+                "batch": 32,
+                "context": 2048,
+                "step_bytes": 1779016320,
+                "tokens_per_s": 6611.361691213781
+              }
+            ]
+          },
+          "fp32": {
+            "dtype_bytes": 4,
+            "streamed_weight_bytes": 538060032,
+            "streamed_weight_gib": 0.5011074542999268,
+            "kv_bytes_per_token": 46080,
+            "ceilings": [
+              {
+                "batch": 1,
+                "context": 128,
+                "step_bytes": 543960576,
+                "tokens_per_s": 675.6992639396327
+              },
+              {
+                "batch": 1,
+                "context": 512,
+                "step_bytes": 561655296,
+                "tokens_per_s": 654.4116354515397
+              },
+              {
+                "batch": 1,
+                "context": 2048,
+                "step_bytes": 632434176,
+                "tokens_per_s": 581.17314775756
+              },
+              {
+                "batch": 2,
+                "context": 128,
+                "step_bytes": 549861120,
+                "tokens_per_s": 1336.8967088103216
+              },
+              {
+                "batch": 2,
+                "context": 512,
+                "step_bytes": 585250560,
+                "tokens_per_s": 1256.0560755905253
+              },
+              {
+                "batch": 2,
+                "context": 2048,
+                "step_bytes": 726808320,
+                "tokens_per_s": 1011.4186937633808
+              },
+              {
+                "batch": 4,
+                "context": 128,
+                "step_bytes": 561662208,
+                "tokens_per_s": 2617.61432818623
+              },
+              {
+                "batch": 4,
+                "context": 512,
+                "step_bytes": 632441088,
+                "tokens_per_s": 2324.6671842761657
+              },
+              {
+                "batch": 4,
+                "context": 2048,
+                "step_bytes": 915556608,
+                "tokens_per_s": 1605.8155557122195
+              },
+              {
+                "batch": 8,
+                "context": 128,
+                "step_bytes": 585264384,
+                "tokens_per_s": 5024.105629709785
+              },
+              {
+                "batch": 8,
+                "context": 512,
+                "step_bytes": 726822144,
+                "tokens_per_s": 4045.597827194199
+              },
+              {
+                "batch": 8,
+                "context": 2048,
+                "step_bytes": 1293053184,
+                "tokens_per_s": 2274.0209938054873
+              },
+              {
+                "batch": 16,
+                "context": 128,
+                "step_bytes": 632468736,
+                "tokens_per_s": 9298.262251252303
+              },
+              {
+                "batch": 16,
+                "context": 512,
+                "step_bytes": 915584256,
+                "tokens_per_s": 6423.068258882401
+              },
+              {
+                "batch": 16,
+                "context": 2048,
+                "step_bytes": 2048046336,
+                "tokens_per_s": 2871.448789841276
+              },
+              {
+                "batch": 32,
+                "context": 128,
+                "step_bytes": 726877440,
+                "tokens_per_s": 16181.160260101231
+              },
+              {
+                "batch": 32,
+                "context": 512,
+                "step_bytes": 1293108480,
+                "tokens_per_s": 9095.695007809489
+              },
+              {
+                "batch": 32,
+                "context": 2048,
+                "step_bytes": 3558032640,
+                "tokens_per_s": 3305.6808456068907
+              }
+            ]
+          }
+        }
+      },
+      "HuggingFaceTB/SmolLM2-1.7B": {
+        "revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+        "parameter_elements": 1711376384,
+        "tie_word_embeddings": true,
+        "n_layers": 24,
+        "n_heads": 32,
+        "n_kv_heads": 32,
+        "head_dim": 64,
+        "dtypes": {
+          "bf16": {
+            "dtype_bytes": 2,
+            "streamed_weight_bytes": 3422752768,
+            "streamed_weight_gib": 3.1876869201660156,
+            "kv_bytes_per_token": 196608,
+            "ceilings": [
+              {
+                "batch": 1,
+                "context": 128,
+                "step_bytes": 3447922688,
+                "tokens_per_s": 106.60150881416128
+              },
+              {
+                "batch": 1,
+                "context": 512,
+                "step_bytes": 3523420160,
+                "tokens_per_s": 104.31732354491002
+              },
+              {
+                "batch": 1,
+                "context": 2048,
+                "step_bytes": 3825410048,
+                "tokens_per_s": 96.08218627635567
+              },
+              {
+                "batch": 2,
+                "context": 128,
+                "step_bytes": 3473092608,
+                "tokens_per_s": 211.65790970776132
+              },
+              {
+                "batch": 2,
+                "context": 512,
+                "step_bytes": 3624087552,
+                "tokens_per_s": 202.83933847709574
+              },
+              {
+                "batch": 2,
+                "context": 2048,
+                "step_bytes": 4228067328,
+                "tokens_per_s": 173.86372179141355
+              },
+              {
+                "batch": 4,
+                "context": 128,
+                "step_bytes": 3523432448,
+                "tokens_per_s": 417.2678389495023
+              },
+              {
+                "batch": 4,
+                "context": 512,
+                "step_bytes": 3825422336,
+                "tokens_per_s": 384.3275105668005
+              },
+              {
+                "batch": 4,
+                "context": 2048,
+                "step_bytes": 5033381888,
+                "tokens_per_s": 292.0928862494279
+              },
+              {
+                "batch": 8,
+                "context": 128,
+                "step_bytes": 3624112128,
+                "tokens_per_s": 811.3518518936479
+              },
+              {
+                "batch": 8,
+                "context": 512,
+                "step_bytes": 4228091904,
+                "tokens_per_s": 695.4508447986256
+              },
+              {
+                "batch": 8,
+                "context": 2048,
+                "step_bytes": 6644011008,
+                "tokens_per_s": 442.56851516086914
+              },
+              {
+                "batch": 16,
+                "context": 128,
+                "step_bytes": 3825471488,
+                "tokens_per_s": 1537.2902899664896
+              },
+              {
+                "batch": 16,
+                "context": 512,
+                "step_bytes": 5033431040,
+                "tokens_per_s": 1168.3601357228604
+              },
+              {
+                "batch": 16,
+                "context": 2048,
+                "step_bytes": 9865269248,
+                "tokens_per_s": 596.1175539368369
+              },
+              {
+                "batch": 32,
+                "context": 128,
+                "step_bytes": 4228190208,
+                "tokens_per_s": 2781.738703201717
+              },
+              {
+                "batch": 32,
+                "context": 512,
+                "step_bytes": 6644109312,
+                "tokens_per_s": 1770.2478682656745
+              },
+              {
+                "batch": 32,
+                "context": 2048,
+                "step_bytes": 16307785728,
+                "tokens_per_s": 721.2334367318539
+              }
+            ]
+          },
+          "fp32": {
+            "dtype_bytes": 4,
+            "streamed_weight_bytes": 6845505536,
+            "streamed_weight_gib": 6.375373840332031,
+            "kv_bytes_per_token": 393216,
+            "ceilings": [
+              {
+                "batch": 1,
+                "context": 128,
+                "step_bytes": 6895845376,
+                "tokens_per_s": 53.30075440708064
+              },
+              {
+                "batch": 1,
+                "context": 512,
+                "step_bytes": 7046840320,
+                "tokens_per_s": 52.15866177245501
+              },
+              {
+                "batch": 1,
+                "context": 2048,
+                "step_bytes": 7650820096,
+                "tokens_per_s": 48.041093138177835
+              },
+              {
+                "batch": 2,
+                "context": 128,
+                "step_bytes": 6946185216,
+                "tokens_per_s": 105.82895485388066
+              },
+              {
+                "batch": 2,
+                "context": 512,
+                "step_bytes": 7248175104,
+                "tokens_per_s": 101.41966923854787
+              },
+              {
+                "batch": 2,
+                "context": 2048,
+                "step_bytes": 8456134656,
+                "tokens_per_s": 86.93186089570678
+              },
+              {
+                "batch": 4,
+                "context": 128,
+                "step_bytes": 7046864896,
+                "tokens_per_s": 208.63391947475114
+              },
+              {
+                "batch": 4,
+                "context": 512,
+                "step_bytes": 7650844672,
+                "tokens_per_s": 192.16375528340026
+              },
+              {
+                "batch": 4,
+                "context": 2048,
+                "step_bytes": 10066763776,
+                "tokens_per_s": 146.04644312471396
+              },
+              {
+                "batch": 8,
+                "context": 128,
+                "step_bytes": 7248224256,
+                "tokens_per_s": 405.67592594682395
+              },
+              {
+                "batch": 8,
+                "context": 512,
+                "step_bytes": 8456183808,
+                "tokens_per_s": 347.7254223993128
+              },
+              {
+                "batch": 8,
+                "context": 2048,
+                "step_bytes": 13288022016,
+                "tokens_per_s": 221.28425758043457
+              },
+              {
+                "batch": 16,
+                "context": 128,
+                "step_bytes": 7650942976,
+                "tokens_per_s": 768.6451449832448
+              },
+              {
+                "batch": 16,
+                "context": 512,
+                "step_bytes": 10066862080,
+                "tokens_per_s": 584.1800678614302
+              },
+              {
+                "batch": 16,
+                "context": 2048,
+                "step_bytes": 19730538496,
+                "tokens_per_s": 298.05877696841844
+              },
+              {
+                "batch": 32,
+                "context": 128,
+                "step_bytes": 8456380416,
+                "tokens_per_s": 1390.8693516008584
+              },
+              {
+                "batch": 32,
+                "context": 512,
+                "step_bytes": 13288218624,
+                "tokens_per_s": 885.1239341328372
+              },
+              {
+                "batch": 32,
+                "context": 2048,
+                "step_bytes": 32615571456,
+                "tokens_per_s": 360.61671836592694
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
