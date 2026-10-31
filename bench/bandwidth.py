@@ -1,4 +1,4 @@
-# achievable device-to-device bandwidth, and the decode ceiling it implies.
+# achievable device-to-device bandwidth and the decode ceiling
 # make bench-bandwidth
 
 import json

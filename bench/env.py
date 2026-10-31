@@ -22,8 +22,6 @@ _SMI_FIELDS = (
 
 
 def compute_apps() -> dict:
-    # An empty list means no CUDA client. The desktop compositor does not show
-    # up here; it still owns the display and keeps the card from sitting locked.
     cmd = [
         "nvidia-smi",
         "--query-compute-apps=pid,process_name,used_gpu_memory",
@@ -40,8 +38,6 @@ def compute_apps() -> dict:
 
 
 def nvidia_smi() -> dict:
-    # Clocks are observed, not locked. WSL2 often refuses a locked application
-    # clock, so a number from this machine has to say what the card was doing.
     query = ",".join(_SMI_FIELDS)
     cmd = ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"]
     try:

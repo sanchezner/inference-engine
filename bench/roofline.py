@@ -1,32 +1,13 @@
-"""Decode ceiling from measured bandwidth.
-
-A decode step reads every weight once and the live KV of every sequence, then
-emits one token per sequence. The ceiling is how many tokens per second that
-move costs if the GPU does nothing else with the bytes.
-
-Section 7 also writes ``bandwidth / (weight_bytes + kv_bytes_live / batch)``.
-That form never divides the weights by the batch, so a bigger batch does not
-share the weight read. The sentence above it ("read all weights once plus the
-live KV") is what a batched GEMM actually does, and it is the form used here.
-"""
-
 from engine.config import ModelConfig
 
 
 def kv_bytes_per_token(cfg: ModelConfig, dtype_bytes: int) -> int:
-    # K and V, one vector per KV head per layer. GQA stores the KV heads, not
-    # a copy per query head.
+    # K and V, one vector per KV head per layer, GQA stores the KV heads
     return 2 * cfg.n_layers * cfg.n_kv_heads * cfg.head_dim * dtype_bytes
 
 
 def streamed_weight_elements(cfg: ModelConfig) -> int:
-    """Parameter elements read in full on one decode step.
-
-    The LM head is a full matrix-vector product, so the whole table moves.
-    A tied embedding is that same table and is not added again. An untied
-    embedding table is not streamed either: decode gathers one row of it,
-    which `embedding_lookup_bytes` counts separately.
-    """
+    # parameter elements read in full on one decode step.
     hidden = cfg.hidden_size
     q = cfg.n_heads * cfg.head_dim * hidden
     kv = cfg.n_kv_heads * cfg.head_dim * hidden
@@ -40,7 +21,7 @@ def streamed_weight_bytes(cfg: ModelConfig, dtype_bytes: int) -> int:
 
 
 def parameter_elements(cfg: ModelConfig) -> int:
-    # Storage, not traffic. Untied models keep a second copy of the table.
+    # storage; untied models keep a second copy of the table
     streamed = streamed_weight_elements(cfg)
     if cfg.tie_word_embeddings:
         return streamed
@@ -52,12 +33,7 @@ def embedding_lookup_bytes(cfg: ModelConfig, dtype_bytes: int, batch: int) -> in
 
 
 def decode_step_bytes(cfg: ModelConfig, dtype_bytes: int, batch: int, context: int) -> int:
-    """Bytes moved to produce `batch` tokens that each attend over `context` KV tokens.
-
-    `context` includes the token just written. Activations are left out: section 7
-    names weights and the live KV, and at these sizes the activations are noise
-    next to either one.
-    """
+    # bytes moved to produce batch tokens that each attend over context KV tokens.
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     if context < 0:
