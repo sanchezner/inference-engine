@@ -1,0 +1,3227 @@
+{
+  "milestone": "M2",
+  "part": "profile",
+  "date": "2026-11-02",
+  "host": "WSL2",
+  "command": "make bench-profile",
+  "methodology": "Decode steps of forward_paged_batch on CUDA bf16, block size 16. Each sequence is prefilled once to its target length; every measured step then rewinds seq_len so the next step sees the same context and overwrites the same KV slot. The step matches the body of generate_continuous_paged: one new token per sequence, argmax, then a per-sequence .to(cpu) and .item(). A second finish path reads the whole argmax row with one .tolist(), so the extra syncs are visible. Step time is CUDA events around the forward plus the host time through the token read, after a sync so the card is idle at the start of the sample. Five warmup steps, then twenty timed steps; the reported step time is the median. A separate pass of four steps puts two CUDA events around each named call. That span includes the GPU waiting for Python, so it is not kernel time; the profiler attributes kernel time to the same names. page_gather is inside gather_padded; the pad cost is the difference, and it is not added on top. weight_gemm is a matmul whose inputs are both rank <= 3 (the projections, the MLP, the lm_head). attn_gemm is a rank-4 matmul (scores and the attention output). The profiler runs two further steps. Kernel time is summed from the trace. A kernel is charged to the innermost GPU annotation that covers its timestamps, so page_gather is not also added into gather_padded. Gaps are the idle time between kernels on a stream. The profiler's own overhead widens those gaps; the uninstrumented CUDA-event span is the step time, and idle_inside_span_ms subtracts the profiled kernel-busy time from that span. Host is WSL2. Clocks are not locked. fp32 1.7B does not fit beside a CUDA context on this 8 GB card, so the profile is bf16.",
+  "environment": {
+    "host": "WSL2",
+    "python": "3.14.4",
+    "torch": "2.14.1+cu132",
+    "triton": "3.8.0",
+    "cuda_build": "13.2",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3070",
+    "gpu_total_bytes": 8589279232,
+    "sm_count": 46,
+    "nsight_systems": true,
+    "nsight_compute": true,
+    "nvidia_smi": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P8",
+      "clocks.sm": "210",
+      "clocks.mem": "405",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "19.52",
+      "utilization.gpu": "37"
+    },
+    "compute_apps": {
+      "ok": true,
+      "apps": []
+    },
+    "git": {
+      "ok": true,
+      "sha": "03154c356a4c28b3f550693a487901b2cc2e50e6",
+      "dirty": true
+    }
+  },
+  "nvidia_smi_under_load": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1980",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "97.40",
+    "utilization.gpu": "32"
+  },
+  "nvidia_smi_after": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P3",
+    "clocks.sm": "765",
+    "clocks.mem": "5001",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "32.19",
+    "utilization.gpu": "10"
+  },
+  "models": {
+    "HuggingFaceTB/SmolLM2-135M": {
+      "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+      "n_layers": 30,
+      "n_heads": 9,
+      "n_kv_heads": 3,
+      "head_dim": 64,
+      "gqa_rep": 3,
+      "dtype": "bf16",
+      "kv_bytes_per_token": 23040,
+      "ceilings_need_bandwidth": [
+        {
+          "lengths": [
+            128
+          ],
+          "step_bytes_at_max_len": 271980288
+        },
+        {
+          "lengths": [
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128
+          ],
+          "step_bytes_at_max_len": 292632192
+        },
+        {
+          "lengths": [
+            512
+          ],
+          "step_bytes_at_max_len": 280827648
+        },
+        {
+          "lengths": [
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512
+          ],
+          "step_bytes_at_max_len": 363411072
+        },
+        {
+          "lengths": [
+            32,
+            32,
+            32,
+            512
+          ],
+          "step_bytes_at_max_len": 316220544
+        }
+      ],
+      "cases": [
+        {
+          "batch": 1,
+          "lengths": [
+            128
+          ],
+          "max_len": 128,
+          "sum_len": 128,
+          "padded_over_sum": 1.0,
+          "pages": 9,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 59.46761050108762,
+            "wall_ms_min": 46.12029599957168,
+            "wall_ms_max": 94.72948100301437,
+            "gpu_span_ms": 59.32974433898926,
+            "token_sync_cpu_ms": 0.13047649918007664,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 68.06357499954174,
+            "wall_ms_min": 46.68763899826445,
+            "wall_ms_max": 111.61017099948367,
+            "gpu_span_ms": 67.94334411621094,
+            "token_sync_cpu_ms": 0.12974000128451735,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 9.78436003625393,
+              "cpu_ms_per_step": 10.92481000614498
+            },
+            "page_write": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 2.5355840160045773,
+              "cpu_ms_per_step": 3.24143800753518
+            },
+            "repeat_kv": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 3.8241679975762963,
+              "cpu_ms_per_step": 5.679615745066258
+            },
+            "weight_gemm": {
+              "calls": 844,
+              "calls_per_step": 211.0,
+              "span_ms_per_step": 13.744080006377771,
+              "cpu_ms_per_step": 19.796823754404613
+            },
+            "gather_padded": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 13.512807972729206,
+              "cpu_ms_per_step": 14.705721502650704
+            },
+            "attn_gemm": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 6.36954403098207,
+              "cpu_ms_per_step": 8.340615500856075
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "page_gather",
+                "count": 60,
+                "self_device_us": 19782.14800000008,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_write",
+                "count": 60,
+                "self_device_us": 3769.3460000001032,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 1576,
+                "self_device_us": 2971.7060000004467,
+                "self_cpu_us": 10499.27499999985
+              },
+              {
+                "name": "aten::mm",
+                "count": 422,
+                "self_device_us": 2862.796999999762,
+                "self_cpu_us": 10250.559999999969
+              },
+              {
+                "name": "weight_gemm",
+                "count": 422,
+                "self_device_us": 2862.796999999762,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 60,
+                "self_device_us": 2530.4770000000317,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 726,
+                "self_device_us": 1699.2050000003333,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 300,
+                "self_device_us": 1523.4789999998065,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 120,
+                "self_device_us": 1060.7289999999339,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 480,
+                "self_device_us": 1009.3390000002655,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 604,
+                "self_device_us": 929.2189999999091,
+                "self_cpu_us": 6187.078999999701
+              },
+              {
+                "name": "aten::cat",
+                "count": 360,
+                "self_device_us": 750.4240000000937,
+                "self_cpu_us": 4291.086000000091
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 362,
+                "self_device_us": 608.2599999998292,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 424,
+                "self_device_us": 544.7179999997247,
+                "self_cpu_us": 4492.249000000076
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel",
+                "count": 302,
+                "self_device_us": 387.13099999981023,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mean",
+                "count": 122,
+                "self_device_us": 343.55099999996764,
+                "self_cpu_us": 1739.0519999998428
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 122,
+                "self_device_us": 343.55099999996764,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 120,
+                "self_device_us": 291.5490000000473,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "repeat_kv",
+                "count": 120,
+                "self_device_us": 279.54600000001847,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void gemv2T_kernel_val",
+                "count": 2,
+                "self_device_us": 278.58900000002177,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 120,
+                "self_device_us": 272.9600000000164,
+                "self_cpu_us": 5619.989000000136
+              },
+              {
+                "name": "attn_gemm",
+                "count": 120,
+                "self_device_us": 272.9600000000164,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 120,
+                "self_device_us": 224.13000000002285,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 126,
+                "self_device_us": 216.60599999996748,
+                "self_cpu_us": 2027.7550000001402
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 120,
+                "self_device_us": 211.00500000003922,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 4602,
+              "busy_us": 10190.148,
+              "gap_us": 207468.810546875,
+              "span_us": 217658.89208984375,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.12393499999999996
+                },
+                "page_gather": {
+                  "kernel_count": 360,
+                  "busy_ms_per_step": 0.2580640000000001
+                },
+                "page_write": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.10359900000000005
+                },
+                "repeat_kv": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.1397730000000001
+                },
+                "weight_gemm": {
+                  "kernel_count": 422,
+                  "busy_ms_per_step": 1.4313985000000007
+                },
+                "attn_gemm": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.13647999999999988
+                }
+              },
+              "other_busy_ms_per_step": 2.9018245000000022,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 0.8496025000000027,
+                  "count": 726
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.30413,
+                  "count": 362
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.19356549999999959,
+                  "count": 302
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.1717755000000002,
+                  "count": 122
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.1457745,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.11206500000000001,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.10550250000000004,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.09354799999999991,
+                  "count": 120
+                }
+              ]
+            },
+            "busy_ms_per_step": 5.095073999999999,
+            "idle_inside_span_ms": 54.23467033898926
+          }
+        },
+        {
+          "batch": 8,
+          "lengths": [
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128
+          ],
+          "max_len": 128,
+          "sum_len": 1024,
+          "padded_over_sum": 1.0,
+          "pages": 72,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 172.63056849878922,
+            "wall_ms_min": 125.5874140006199,
+            "wall_ms_max": 204.41643300000578,
+            "gpu_span_ms": 171.58524322509766,
+            "token_sync_cpu_ms": 1.044907499817782,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 164.5056464985828,
+            "wall_ms_min": 124.02062699766248,
+            "wall_ms_max": 211.07492599912803,
+            "gpu_span_ms": 164.350341796875,
+            "token_sync_cpu_ms": 0.5854765004187357,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 960,
+              "calls_per_step": 240.0,
+              "span_ms_per_step": 98.95805596187711,
+              "cpu_ms_per_step": 112.97144698801276
+            },
+            "page_write": {
+              "calls": 960,
+              "calls_per_step": 240.0,
+              "span_ms_per_step": 23.651552060153335,
+              "cpu_ms_per_step": 28.902835487315315
+            },
+            "repeat_kv": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 4.897415990708396,
+              "cpu_ms_per_step": 6.710569748975104
+            },
+            "weight_gemm": {
+              "calls": 844,
+              "calls_per_step": 211.0,
+              "span_ms_per_step": 24.29023204324767,
+              "cpu_ms_per_step": 24.81031100069231
+            },
+            "gather_padded": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 113.18243223428726,
+              "cpu_ms_per_step": 117.8947105026964
+            },
+            "attn_gemm": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 6.009287983877584,
+              "cpu_ms_per_step": 9.470000506553333
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "page_gather",
+                "count": 480,
+                "self_device_us": 193201.85200000025,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_write",
+                "count": 480,
+                "self_device_us": 23149.656000000497,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "weight_gemm",
+                "count": 422,
+                "self_device_us": 22485.47000000024,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 422,
+                "self_device_us": 21624.97600000013,
+                "self_cpu_us": 11412.42200000089
+              },
+              {
+                "name": "aten::copy_",
+                "count": 4110,
+                "self_device_us": 20149.037999999975,
+                "self_cpu_us": 28751.548000000526
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 300,
+                "self_device_us": 15700.491000000537,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 2040,
+                "self_device_us": 10804.001999999102,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 726,
+                "self_device_us": 7692.928000000281,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 966,
+                "self_device_us": 5046.837000000016,
+                "self_cpu_us": 15874.558999999921
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 966,
+                "self_device_us": 5046.837000000016,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::cat",
+                "count": 360,
+                "self_device_us": 3806.643999999974,
+                "self_cpu_us": 3662.5599999997785
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_tn",
+                "count": 2,
+                "self_device_us": 2989.3880000000063,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 60,
+                "self_device_us": 2490.5689999999195,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 120,
+                "self_device_us": 2267.108000000102,
+                "self_cpu_us": 6016.632999999687
+              },
+              {
+                "name": "attn_gemm",
+                "count": 120,
+                "self_device_us": 2267.108000000102,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 120,
+                "self_device_us": 2076.583999999989,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 604,
+                "self_device_us": 2043.303000001025,
+                "self_cpu_us": 6199.173999999916
+              },
+              {
+                "name": "ampere_s16816gemm_bf16_64x128_ldg8_stages_32x6_tn",
+                "count": 120,
+                "self_device_us": 1974.9189999996925,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "repeat_kv",
+                "count": 120,
+                "self_device_us": 1941.9610000001067,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 484,
+                "self_device_us": 1704.6820000005566,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 60,
+                "self_device_us": 1704.293000000027,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 424,
+                "self_device_us": 1285.636999999602,
+                "self_cpu_us": 4503.325000000538
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 120,
+                "self_device_us": 964.167999999986,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mean",
+                "count": 122,
+                "self_device_us": 837.6650000001712,
+                "self_cpu_us": 1475.1019999996308
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 122,
+                "self_device_us": 837.6650000001712,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 8276,
+              "busy_us": 60138.018,
+              "gap_us": 421839.85009765625,
+              "span_us": 481977.7568359375,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 1.0382919999999998
+                },
+                "page_gather": {
+                  "kernel_count": 2880,
+                  "busy_ms_per_step": 4.876506999999992
+                },
+                "page_write": {
+                  "kernel_count": 960,
+                  "busy_ms_per_step": 2.396702999999999
+                },
+                "repeat_kv": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.9709805000000002
+                },
+                "weight_gemm": {
+                  "kernel_count": 722,
+                  "busy_ms_per_step": 10.812488000000014
+                },
+                "attn_gemm": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 1.133554
+                }
+              },
+              "other_busy_ms_per_step": 8.840484499999999,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 3.8464639999999997,
+                  "count": 726
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.8523410000000003,
+                  "count": 484
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.4820839999999998,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.41883250000000016,
+                  "count": 122
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.4009149999999999,
+                  "count": 302
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.382946,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.33590599999999965,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.2316339999999999,
+                  "count": 120
+                }
+              ]
+            },
+            "busy_ms_per_step": 30.069008999999998,
+            "idle_inside_span_ms": 141.51623422509766
+          }
+        },
+        {
+          "batch": 1,
+          "lengths": [
+            512
+          ],
+          "max_len": 512,
+          "sum_len": 512,
+          "padded_over_sum": 1.0,
+          "pages": 33,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 94.66794049876626,
+            "wall_ms_min": 61.44386600135476,
+            "wall_ms_max": 135.78099599908455,
+            "gpu_span_ms": 94.49679946899414,
+            "token_sync_cpu_ms": 0.16477149983984418,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 72.24653149933147,
+            "wall_ms_min": 62.6572719993419,
+            "wall_ms_max": 92.3945479989925,
+            "gpu_span_ms": 72.10963439941406,
+            "token_sync_cpu_ms": 0.19201300165150315,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 13.91285603120923,
+              "cpu_ms_per_step": 16.94478174977121
+            },
+            "page_write": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 2.7390399754513055,
+              "cpu_ms_per_step": 3.629102743616386
+            },
+            "repeat_kv": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 4.307432005181909,
+              "cpu_ms_per_step": 6.2834030022713705
+            },
+            "weight_gemm": {
+              "calls": 844,
+              "calls_per_step": 211.0,
+              "span_ms_per_step": 21.751384098548442,
+              "cpu_ms_per_step": 21.484947744284
+            },
+            "gather_padded": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 17.50304812192917,
+              "cpu_ms_per_step": 21.171336257793882
+            },
+            "attn_gemm": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 6.6014239934738725,
+              "cpu_ms_per_step": 8.742228001210606
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "page_gather",
+                "count": 60,
+                "self_device_us": 25932.900000000107,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 422,
+                "self_device_us": 19653.97799999996,
+                "self_cpu_us": 10414.602999999686
+              },
+              {
+                "name": "weight_gemm",
+                "count": 422,
+                "self_device_us": 19653.97799999996,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 300,
+                "self_device_us": 8617.492000000035,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 120,
+                "self_device_us": 8145.643999999923,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 1576,
+                "self_device_us": 6735.658000000241,
+                "self_cpu_us": 11127.852999999628
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 726,
+                "self_device_us": 3838.3150000001883,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void gemv2T_kernel_val",
+                "count": 2,
+                "self_device_us": 2890.842000000004,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 60,
+                "self_device_us": 2845.1719999998586,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_write",
+                "count": 60,
+                "self_device_us": 2809.718000000008,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 480,
+                "self_device_us": 2336.834,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 604,
+                "self_device_us": 2002.0800000001389,
+                "self_cpu_us": 6470.506000000663
+              },
+              {
+                "name": "aten::cat",
+                "count": 360,
+                "self_device_us": 1717.7859999998,
+                "self_cpu_us": 4612.0279999999775
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 362,
+                "self_device_us": 1282.1650000001096,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 126,
+                "self_device_us": 1230.2329999999815,
+                "self_cpu_us": 2352.3759999999584
+              },
+              {
+                "name": "aten::add",
+                "count": 424,
+                "self_device_us": 1227.985000000236,
+                "self_cpu_us": 4568.975000000193
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 120,
+                "self_device_us": 1181.97499999995,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 120,
+                "self_device_us": 1124.4119999999639,
+                "self_cpu_us": 5936.344999999829
+              },
+              {
+                "name": "attn_gemm",
+                "count": 120,
+                "self_device_us": 1124.4119999999639,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "repeat_kv",
+                "count": 120,
+                "self_device_us": 791.7579999999925,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel",
+                "count": 302,
+                "self_device_us": 772.1159999999384,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mean",
+                "count": 122,
+                "self_device_us": 682.6410000000408,
+                "self_cpu_us": 1624.6070000001434
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 122,
+                "self_device_us": 682.6410000000408,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 60,
+                "self_device_us": 635.8870000000043,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 120,
+                "self_device_us": 621.1349999999607,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 4602,
+              "busy_us": 37361.116,
+              "gap_us": 203746.662109375,
+              "span_us": 241107.78076171875,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.26009750000000004
+                },
+                "page_gather": {
+                  "kernel_count": 360,
+                  "busy_ms_per_step": 0.9159834999999993
+                },
+                "page_write": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.23059700000000002
+                },
+                "repeat_kv": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.3958790000000003
+                },
+                "weight_gemm": {
+                  "kernel_count": 422,
+                  "busy_ms_per_step": 9.826989000000003
+                },
+                "attn_gemm": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.562206
+                }
+              },
+              "other_busy_ms_per_step": 6.488806000000002,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 1.9191575000000014,
+                  "count": 726
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.6410825000000001,
+                  "count": 362
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.38605800000000057,
+                  "count": 302
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.34132049999999986,
+                  "count": 122
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.3105675,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.2882280000000001,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.28610250000000004,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.19998700000000008,
+                  "count": 120
+                }
+              ]
+            },
+            "busy_ms_per_step": 18.680558,
+            "idle_inside_span_ms": 75.81624146899414
+          }
+        },
+        {
+          "batch": 8,
+          "lengths": [
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512
+          ],
+          "max_len": 512,
+          "sum_len": 4096,
+          "padded_over_sum": 1.0,
+          "pages": 264,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 154.50348599915742,
+            "wall_ms_min": 129.55747300293297,
+            "wall_ms_max": 224.9064699972223,
+            "gpu_span_ms": 153.9803695678711,
+            "token_sync_cpu_ms": 0.5840339999849675,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 165.3770570010238,
+            "wall_ms_min": 140.38221400187467,
+            "wall_ms_max": 197.73997700031032,
+            "gpu_span_ms": 165.2334747314453,
+            "token_sync_cpu_ms": 0.26740050088847056,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 960,
+              "calls_per_step": 240.0,
+              "span_ms_per_step": 101.09186397492886,
+              "cpu_ms_per_step": 111.36187875490577
+            },
+            "page_write": {
+              "calls": 960,
+              "calls_per_step": 240.0,
+              "span_ms_per_step": 27.921584053430706,
+              "cpu_ms_per_step": 35.16202124501433
+            },
+            "repeat_kv": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 5.330152017530054,
+              "cpu_ms_per_step": 7.307713251975656
+            },
+            "weight_gemm": {
+              "calls": 844,
+              "calls_per_step": 211.0,
+              "span_ms_per_step": 21.558280020952225,
+              "cpu_ms_per_step": 28.640074759096024
+            },
+            "gather_padded": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 115.70462423563004,
+              "cpu_ms_per_step": 117.02094524844142
+            },
+            "attn_gemm": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 6.6198560004122555,
+              "cpu_ms_per_step": 10.285488242516294
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "page_gather",
+                "count": 480,
+                "self_device_us": 184576.62600000005,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_write",
+                "count": 480,
+                "self_device_us": 25521.296000000504,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 4110,
+                "self_device_us": 20045.80300000103,
+                "self_cpu_us": 31459.429999998974
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 2040,
+                "self_device_us": 11916.504000000801,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "weight_gemm",
+                "count": 422,
+                "self_device_us": 8622.993999999337,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 422,
+                "self_device_us": 7236.225999999957,
+                "self_cpu_us": 12660.873000001637
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 726,
+                "self_device_us": 6617.614000000471,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::cat",
+                "count": 360,
+                "self_device_us": 6180.796000000018,
+                "self_cpu_us": 5239.699999999631
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 300,
+                "self_device_us": 4588.264999999983,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 60,
+                "self_device_us": 4387.6510000000635,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "repeat_kv",
+                "count": 120,
+                "self_device_us": 4052.2270000000635,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 120,
+                "self_device_us": 4039.1070000001127,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 120,
+                "self_device_us": 3486.2999999999392,
+                "self_cpu_us": 7090.4609999997665
+              },
+              {
+                "name": "attn_gemm",
+                "count": 120,
+                "self_device_us": 3486.2999999999392,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 966,
+                "self_device_us": 3353.9530000001673,
+                "self_cpu_us": 15895.906999998866
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 966,
+                "self_device_us": 3353.9530000001673,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 60,
+                "self_device_us": 2056.991999999923,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 604,
+                "self_device_us": 1888.7429999999001,
+                "self_cpu_us": 8122.010999999323
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 484,
+                "self_device_us": 1595.586000000019,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 60,
+                "self_device_us": 1429.3080000000164,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 120,
+                "self_device_us": 1354.2700000000787,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_s16816gemm_bf16_64x128_ldg8_stages_32x6_tn",
+                "count": 120,
+                "self_device_us": 1160.0019999998894,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 424,
+                "self_device_us": 1069.8470000002799,
+                "self_cpu_us": 5353.625000000719
+              },
+              {
+                "name": "aten::mean",
+                "count": 122,
+                "self_device_us": 835.9689999998022,
+                "self_cpu_us": 1955.9740000004422
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 122,
+                "self_device_us": 835.9689999998022,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 8276,
+              "busy_us": 47069.198,
+              "gap_us": 479536.5712890625,
+              "span_us": 526605.8061523438,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 2.0195534999999993
+                },
+                "page_gather": {
+                  "kernel_count": 2880,
+                  "busy_ms_per_step": 4.1678940000000555
+                },
+                "page_write": {
+                  "kernel_count": 960,
+                  "busy_ms_per_step": 1.7349979999999947
+                },
+                "repeat_kv": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 2.026113500000001
+                },
+                "weight_gemm": {
+                  "kernel_count": 722,
+                  "busy_ms_per_step": 3.6181129999999975
+                },
+                "attn_gemm": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 1.7431500000000002
+                }
+              },
+              "other_busy_ms_per_step": 8.224776999999996,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 3.3088069999999976,
+                  "count": 726
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.7977929999999984,
+                  "count": 484
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.6771350000000003,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.4179845000000002,
+                  "count": 122
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.39370950000000005,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.3685129999999994,
+                  "count": 302
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.28489599999999976,
+                  "count": 120
+                },
+                {
+                  "name": "void (anonymous namespace)::softmax_warp_forward",
+                  "busy_ms_per_step": 0.20200049999999994,
+                  "count": 60
+                }
+              ]
+            },
+            "busy_ms_per_step": 23.534599,
+            "idle_inside_span_ms": 130.44577056787108
+          }
+        },
+        {
+          "batch": 4,
+          "lengths": [
+            32,
+            32,
+            32,
+            512
+          ],
+          "max_len": 512,
+          "sum_len": 608,
+          "padded_over_sum": 3.3684210526315788,
+          "pages": 42,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 123.67349799933436,
+            "wall_ms_min": 93.42887100137887,
+            "wall_ms_max": 203.31979500042507,
+            "gpu_span_ms": 123.40084838867188,
+            "token_sync_cpu_ms": 0.33694200101308525,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 114.26662200028659,
+            "wall_ms_min": 93.66828499696567,
+            "wall_ms_max": 191.06510699930368,
+            "gpu_span_ms": 114.16252899169922,
+            "token_sync_cpu_ms": 0.15838450053706765,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 480,
+              "calls_per_step": 120.0,
+              "span_ms_per_step": 44.48691991716623,
+              "cpu_ms_per_step": 50.32460224629176
+            },
+            "page_write": {
+              "calls": 480,
+              "calls_per_step": 120.0,
+              "span_ms_per_step": 12.204039996722713,
+              "cpu_ms_per_step": 16.016605500226433
+            },
+            "repeat_kv": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 5.020952008198947,
+              "cpu_ms_per_step": 7.067027760058409
+            },
+            "weight_gemm": {
+              "calls": 844,
+              "calls_per_step": 211.0,
+              "span_ms_per_step": 17.983551991404966,
+              "cpu_ms_per_step": 25.80546199078526
+            },
+            "gather_padded": {
+              "calls": 120,
+              "calls_per_step": 30.0,
+              "span_ms_per_step": 64.51504781842232,
+              "cpu_ms_per_step": 66.62326349760406
+            },
+            "attn_gemm": {
+              "calls": 240,
+              "calls_per_step": 60.0,
+              "span_ms_per_step": 29.053367480635643,
+              "cpu_ms_per_step": 31.75294800712436
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "gather_padded",
+                "count": 60,
+                "self_device_us": 126066.33599999998,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_gather",
+                "count": 240,
+                "self_device_us": 95171.30199999982,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 2662,
+                "self_device_us": 12335.814000000917,
+                "self_cpu_us": 22949.248999999905
+              },
+              {
+                "name": "page_write",
+                "count": 240,
+                "self_device_us": 10657.956999999953,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "weight_gemm",
+                "count": 422,
+                "self_device_us": 7941.593000000255,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 422,
+                "self_device_us": 6928.07600000022,
+                "self_cpu_us": 11494.227999999584
+              },
+              {
+                "name": "aten::cat",
+                "count": 720,
+                "self_device_us": 6397.887999999772,
+                "self_cpu_us": 9101.295000001282
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 1080,
+                "self_device_us": 6008.174000000541,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 726,
+                "self_device_us": 5133.187000000586,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 480,
+                "self_device_us": 5010.993999999799,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 180,
+                "self_device_us": 3198.3870000000115,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "repeat_kv",
+                "count": 120,
+                "self_device_us": 2148.5980000000027,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 604,
+                "self_device_us": 1911.4660000003257,
+                "self_cpu_us": 7335.276999998938
+              },
+              {
+                "name": "aten::bmm",
+                "count": 120,
+                "self_device_us": 1907.1779999997261,
+                "self_cpu_us": 6500.517000000041
+              },
+              {
+                "name": "attn_gemm",
+                "count": 120,
+                "self_device_us": 1907.1779999997261,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 484,
+                "self_device_us": 1611.1730000004188,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 486,
+                "self_device_us": 1530.1000000000063,
+                "self_cpu_us": 8000.1399999994155
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 486,
+                "self_device_us": 1530.1000000000063,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 120,
+                "self_device_us": 1492.044000000069,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_s16816gemm_bf16_64x128_ldg8_stages_32x6_tn",
+                "count": 120,
+                "self_device_us": 1154.1429999998727,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 60,
+                "self_device_us": 1120.8999999998832,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 424,
+                "self_device_us": 1092.1250000001528,
+                "self_cpu_us": 6148.34399999945
+              },
+              {
+                "name": "aten::mean",
+                "count": 122,
+                "self_device_us": 816.7109999998481,
+                "self_cpu_us": 1964.9950000003928
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 122,
+                "self_device_us": 816.7109999998481,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 60,
+                "self_device_us": 786.2779999998429,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 6948,
+              "busy_us": 36890.914,
+              "gap_us": 383235.5380859375,
+              "span_us": 420126.46337890625,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 840,
+                  "busy_ms_per_step": 2.8713404999999868
+                },
+                "page_gather": {
+                  "kernel_count": 1440,
+                  "busy_ms_per_step": 1.9479825000000057
+                },
+                "page_write": {
+                  "kernel_count": 480,
+                  "busy_ms_per_step": 0.8869349999999996
+                },
+                "repeat_kv": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 1.0742989999999997
+                },
+                "weight_gemm": {
+                  "kernel_count": 602,
+                  "busy_ms_per_step": 3.464038000000002
+                },
+                "attn_gemm": {
+                  "kernel_count": 120,
+                  "busy_ms_per_step": 0.9535889999999997
+                }
+              },
+              "other_busy_ms_per_step": 7.247273000000006,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 2.566593500000007,
+                  "count": 726
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.8055864999999995,
+                  "count": 484
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.40835550000000004,
+                  "count": 122
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.3712229999999999,
+                  "count": 302
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.36193700000000006,
+                  "count": 120
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.3315100000000001,
+                  "count": 120
+                },
+                {
+                  "name": "void (anonymous namespace)::softmax_warp_forward",
+                  "busy_ms_per_step": 0.3191545,
+                  "count": 60
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.28848350000000006,
+                  "count": 120
+                }
+              ]
+            },
+            "busy_ms_per_step": 18.445456999999998,
+            "idle_inside_span_ms": 104.95539138867187
+          }
+        }
+      ]
+    },
+    "HuggingFaceTB/SmolLM2-1.7B": {
+      "revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+      "n_layers": 24,
+      "n_heads": 32,
+      "n_kv_heads": 32,
+      "head_dim": 64,
+      "gqa_rep": 1,
+      "dtype": "bf16",
+      "kv_bytes_per_token": 196608,
+      "ceilings_need_bandwidth": [
+        {
+          "lengths": [
+            128
+          ],
+          "step_bytes_at_max_len": 3447922688
+        },
+        {
+          "lengths": [
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128
+          ],
+          "step_bytes_at_max_len": 3624112128
+        },
+        {
+          "lengths": [
+            512
+          ],
+          "step_bytes_at_max_len": 3523420160
+        },
+        {
+          "lengths": [
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512
+          ],
+          "step_bytes_at_max_len": 4228091904
+        },
+        {
+          "lengths": [
+            32,
+            32,
+            32,
+            512
+          ],
+          "step_bytes_at_max_len": 3825422336
+        }
+      ],
+      "cases": [
+        {
+          "batch": 1,
+          "lengths": [
+            128
+          ],
+          "max_len": 128,
+          "sum_len": 128,
+          "padded_over_sum": 1.0,
+          "pages": 9,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 57.45279799884884,
+            "wall_ms_min": 47.152129001915455,
+            "wall_ms_max": 74.1470719985955,
+            "gpu_span_ms": 57.29604721069336,
+            "token_sync_cpu_ms": 0.5023694975534454,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 55.57308599782118,
+            "wall_ms_min": 47.61034599869163,
+            "wall_ms_max": 69.87460000163992,
+            "gpu_span_ms": 55.45049476623535,
+            "token_sync_cpu_ms": 0.5121134981891373,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 8.361456006765366,
+              "cpu_ms_per_step": 9.313225504229194
+            },
+            "page_write": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 2.132655998226255,
+              "cpu_ms_per_step": 2.8096897485738737
+            },
+            "repeat_kv": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 0.9765759965230245,
+              "cpu_ms_per_step": 2.21869624874671
+            },
+            "weight_gemm": {
+              "calls": 676,
+              "calls_per_step": 169.0,
+              "span_ms_per_step": 17.51263201236725,
+              "cpu_ms_per_step": 17.49805523922987
+            },
+            "gather_padded": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 11.220688000321388,
+              "cpu_ms_per_step": 12.459734753974772
+            },
+            "attn_gemm": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 4.866984014282934,
+              "cpu_ms_per_step": 6.3646975004303386
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "weight_gemm",
+                "count": 338,
+                "self_device_us": 20415.135000000173,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 338,
+                "self_device_us": 19978.63200000015,
+                "self_cpu_us": 8284.476999999755
+              },
+              {
+                "name": "page_gather",
+                "count": 48,
+                "self_device_us": 14776.791000000027,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 240,
+                "self_device_us": 9239.634000000042,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+                "count": 96,
+                "self_device_us": 8715.288000000002,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 1168,
+                "self_device_us": 3013.028000000122,
+                "self_cpu_us": 6740.190999999433
+              },
+              {
+                "name": "page_write",
+                "count": 48,
+                "self_device_us": 2839.3780000000024,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 48,
+                "self_device_us": 2292.3799999999696,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 582,
+                "self_device_us": 1798.595000000139,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void gemv2T_kernel_val",
+                "count": 2,
+                "self_device_us": 1535.465000000011,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 288,
+                "self_device_us": 1074.3830000001817,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::cat",
+                "count": 288,
+                "self_device_us": 1065.269999999949,
+                "self_cpu_us": 2986.1259999995714
+              },
+              {
+                "name": "aten::mul",
+                "count": 484,
+                "self_device_us": 921.2809999999322,
+                "self_cpu_us": 4369.424999999705
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 290,
+                "self_device_us": 595.1049999999109,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 340,
+                "self_device_us": 531.0009999999488,
+                "self_cpu_us": 3161.7379999997056
+              },
+              {
+                "name": "void cublasLt::splitKreduce_kernel",
+                "count": 240,
+                "self_device_us": 488.24500000009766,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 96,
+                "self_device_us": 399.067999999907,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 96,
+                "self_device_us": 366.74999999990996,
+                "self_cpu_us": 4518.5119999998515
+              },
+              {
+                "name": "attn_gemm",
+                "count": 96,
+                "self_device_us": 366.74999999990996,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mean",
+                "count": 98,
+                "self_device_us": 366.3320000000225,
+                "self_cpu_us": 1125.2060000002957
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 98,
+                "self_device_us": 366.3320000000225,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel",
+                "count": 242,
+                "self_device_us": 352.21700000004716,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 102,
+                "self_device_us": 350.39899999991485,
+                "self_cpu_us": 1478.2789999999304
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 96,
+                "self_device_us": 338.39799999998195,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 96,
+                "self_device_us": 327.3599999999112,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 3834,
+              "busy_us": 27873.475,
+              "gap_us": 127841.42431640625,
+              "span_us": 155714.92626953125,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 0.16390200000000005
+                },
+                "page_gather": {
+                  "kernel_count": 288,
+                  "busy_ms_per_step": 0.39980399999999944
+                },
+                "page_write": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 0.15857050000000006
+                },
+                "repeat_kv": {
+                  "kernel_count": 0,
+                  "busy_ms_per_step": 0.0
+                },
+                "weight_gemm": {
+                  "kernel_count": 578,
+                  "busy_ms_per_step": 9.989316000000008
+                },
+                "attn_gemm": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 0.18337499999999993
+                }
+              },
+              "other_busy_ms_per_step": 3.041770000000002,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 0.8992975000000021,
+                  "count": 582
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.2975525000000001,
+                  "count": 290
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.19953399999999988,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.183166,
+                  "count": 98
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.17610849999999972,
+                  "count": 242
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.16919900000000002,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.10618899999999995,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.0972325,
+                  "count": 96
+                }
+              ]
+            },
+            "busy_ms_per_step": 13.9367375,
+            "idle_inside_span_ms": 43.35930971069336
+          }
+        },
+        {
+          "batch": 8,
+          "lengths": [
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128,
+            128
+          ],
+          "max_len": 128,
+          "sum_len": 1024,
+          "padded_over_sum": 1.0,
+          "pages": 72,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 120.4299209985038,
+            "wall_ms_min": 96.05097999883583,
+            "wall_ms_max": 166.31556200081832,
+            "gpu_span_ms": 119.92594909667969,
+            "token_sync_cpu_ms": 1.0961070001940243,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 129.8450904996571,
+            "wall_ms_min": 107.79987000205438,
+            "wall_ms_max": 188.80335399808246,
+            "gpu_span_ms": 129.60956954956055,
+            "token_sync_cpu_ms": 0.8132074981404003,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 768,
+              "calls_per_step": 192.0,
+              "span_ms_per_step": 74.4811279810965,
+              "cpu_ms_per_step": 84.02861548165674
+            },
+            "page_write": {
+              "calls": 768,
+              "calls_per_step": 192.0,
+              "span_ms_per_step": 20.634936007671058,
+              "cpu_ms_per_step": 25.571313247382932
+            },
+            "repeat_kv": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 0.9578719970304519,
+              "cpu_ms_per_step": 3.087528242758708
+            },
+            "weight_gemm": {
+              "calls": 676,
+              "calls_per_step": 169.0,
+              "span_ms_per_step": 22.80428801011294,
+              "cpu_ms_per_step": 19.334974234880065
+            },
+            "gather_padded": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 86.44282376766205,
+              "cpu_ms_per_step": 88.3861677502864
+            },
+            "attn_gemm": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 5.561287988908589,
+              "cpu_ms_per_step": 7.960142244883173
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "page_gather",
+                "count": 384,
+                "self_device_us": 150437.9840000001,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 338,
+                "self_device_us": 33092.944999999774,
+                "self_cpu_us": 9075.490000000955
+              },
+              {
+                "name": "weight_gemm",
+                "count": 338,
+                "self_device_us": 33092.944999999774,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+                "count": 144,
+                "self_device_us": 23463.441999999763,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_write",
+                "count": 384,
+                "self_device_us": 18550.770999999917,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 3198,
+                "self_device_us": 14648.418999999696,
+                "self_cpu_us": 24392.360000002336
+              },
+              {
+                "name": "aten::cat",
+                "count": 288,
+                "self_device_us": 9052.460000000261,
+                "self_cpu_us": 4019.271999999981
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 1536,
+                "self_device_us": 8619.447999999438,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+                "count": 192,
+                "self_device_us": 8185.299000000041,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 48,
+                "self_device_us": 5759.928000000014,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 96,
+                "self_device_us": 5637.650999999836,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 582,
+                "self_device_us": 4891.892000000342,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 774,
+                "self_device_us": 3993.538000000363,
+                "self_cpu_us": 13444.934999999212
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 774,
+                "self_device_us": 3993.538000000363,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 96,
+                "self_device_us": 2800.852000000312,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 96,
+                "self_device_us": 2561.6560000000445,
+                "self_cpu_us": 6102.288999999744
+              },
+              {
+                "name": "attn_gemm",
+                "count": 96,
+                "self_device_us": 2561.6560000000445,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 484,
+                "self_device_us": 1537.7779999998843,
+                "self_cpu_us": 5700.063999999857
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 1477.42000000002,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_tn",
+                "count": 2,
+                "self_device_us": 1444.2039999999688,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 388,
+                "self_device_us": 1253.838999999973,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 1084.2360000000244,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 340,
+                "self_device_us": 817.3799999996343,
+                "self_cpu_us": 4266.4989999991685
+              },
+              {
+                "name": "aten::mean",
+                "count": 98,
+                "self_device_us": 768.7779999999816,
+                "self_cpu_us": 1557.148999999898
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 98,
+                "self_device_us": 768.7779999999816,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 6296,
+              "busy_us": 68576.093,
+              "gap_us": 342401.78564453125,
+              "span_us": 410977.896484375,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 2.8188255
+                },
+                "page_gather": {
+                  "kernel_count": 2304,
+                  "busy_ms_per_step": 4.7574575000000365
+                },
+                "page_write": {
+                  "kernel_count": 768,
+                  "busy_ms_per_step": 1.777686000000003
+                },
+                "repeat_kv": {
+                  "kernel_count": 0,
+                  "busy_ms_per_step": 0.0
+                },
+                "weight_gemm": {
+                  "kernel_count": 338,
+                  "busy_ms_per_step": 16.54647250000001
+                },
+                "attn_gemm": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 1.2808280000000005
+                }
+              },
+              "other_busy_ms_per_step": 7.106776999999999,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 2.4459459999999984,
+                  "count": 582
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 1.4004260000000004,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.6269194999999993,
+                  "count": 388
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.3843890000000002,
+                  "count": 98
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.30697850000000004,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.26419150000000036,
+                  "count": 242
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.190049,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.1477285,
+                  "count": 96
+                }
+              ]
+            },
+            "busy_ms_per_step": 34.2880465,
+            "idle_inside_span_ms": 85.63790259667968
+          }
+        },
+        {
+          "batch": 1,
+          "lengths": [
+            512
+          ],
+          "max_len": 512,
+          "sum_len": 512,
+          "padded_over_sum": 1.0,
+          "pages": 33,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 65.9944569979416,
+            "wall_ms_min": 51.373099002375966,
+            "wall_ms_max": 93.64656300022034,
+            "gpu_span_ms": 65.85366439819336,
+            "token_sync_cpu_ms": 0.48958549996314105,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 60.47186499745294,
+            "wall_ms_min": 51.761762999376515,
+            "wall_ms_max": 102.65255900230841,
+            "gpu_span_ms": 60.337791442871094,
+            "token_sync_cpu_ms": 0.4778580005222466,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 9.706647999584675,
+              "cpu_ms_per_step": 10.221291507150454
+            },
+            "page_write": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 2.3760879992041737,
+              "cpu_ms_per_step": 3.1479687522733
+            },
+            "repeat_kv": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 1.1885919934429694,
+              "cpu_ms_per_step": 2.6544657530394034
+            },
+            "weight_gemm": {
+              "calls": 676,
+              "calls_per_step": 169.0,
+              "span_ms_per_step": 18.2372080036439,
+              "cpu_ms_per_step": 19.997492501715897
+            },
+            "gather_padded": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 13.304128028452396,
+              "cpu_ms_per_step": 13.78563500020391
+            },
+            "attn_gemm": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 5.200040003517643,
+              "cpu_ms_per_step": 7.335911749578372
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "weight_gemm",
+                "count": 338,
+                "self_device_us": 20006.288999999793,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 338,
+                "self_device_us": 19295.554999999807,
+                "self_cpu_us": 9273.571999999702
+              },
+              {
+                "name": "page_gather",
+                "count": 48,
+                "self_device_us": 18794.19400000004,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void cutlass::Kernel2",
+                "count": 240,
+                "self_device_us": 9195.970999999892,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+                "count": 96,
+                "self_device_us": 8660.060000000041,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 1168,
+                "self_device_us": 4550.03600000024,
+                "self_cpu_us": 8327.624999999894
+              },
+              {
+                "name": "page_write",
+                "count": 48,
+                "self_device_us": 2937.7440000000397,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 288,
+                "self_device_us": 2904.224000000141,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::cat",
+                "count": 288,
+                "self_device_us": 2580.092999999956,
+                "self_cpu_us": 3846.6119999999983
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 582,
+                "self_device_us": 2466.5670000002056,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 48,
+                "self_device_us": 2297.6959999999635,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 102,
+                "self_device_us": 1017.6120000000284,
+                "self_cpu_us": 1887.7679999998031
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 96,
+                "self_device_us": 995.7560000000051,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void gemv2T_kernel_val",
+                "count": 2,
+                "self_device_us": 967.247000000003,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 96,
+                "self_device_us": 925.1129999999694,
+                "self_cpu_us": 4939.715000000135
+              },
+              {
+                "name": "attn_gemm",
+                "count": 96,
+                "self_device_us": 925.1129999999694,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 96,
+                "self_device_us": 919.3469999999302,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 484,
+                "self_device_us": 886.8579999998533,
+                "self_cpu_us": 5973.5180000001
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 290,
+                "self_device_us": 574.2609999998658,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 523.833000000006,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 340,
+                "self_device_us": 517.3770000001949,
+                "self_cpu_us": 4118.416999999945
+              },
+              {
+                "name": "void cublasLt::splitKreduce_kernel",
+                "count": 240,
+                "self_device_us": 472.2769999998709,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 401.27999999996337,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 96,
+                "self_device_us": 384.31099999999606,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mean",
+                "count": 98,
+                "self_device_us": 352.79799999994,
+                "self_cpu_us": 1458.9360000000502
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 3834,
+              "busy_us": 31521.119,
+              "gap_us": 158587.16650390625,
+              "span_us": 190108.3115234375,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 0.6382174999999999
+                },
+                "page_gather": {
+                  "kernel_count": 288,
+                  "busy_ms_per_step": 1.1804290000000002
+                },
+                "page_write": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 0.15257550000000003
+                },
+                "repeat_kv": {
+                  "kernel_count": 0,
+                  "busy_ms_per_step": 0.0
+                },
+                "weight_gemm": {
+                  "kernel_count": 578,
+                  "busy_ms_per_step": 9.647777499999991
+                },
+                "attn_gemm": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 0.4625565000000001
+                }
+              },
+              "other_busy_ms_per_step": 3.6790035000000016,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 1.2332835000000018,
+                  "count": 582
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 0.45967350000000007,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.2871305,
+                  "count": 290
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.19215550000000003,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.17639900000000003,
+                  "count": 98
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.17004899999999992,
+                  "count": 242
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.13183599999999998,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.09409300000000005,
+                  "count": 96
+                }
+              ]
+            },
+            "busy_ms_per_step": 15.7605595,
+            "idle_inside_span_ms": 50.09310489819336
+          }
+        },
+        {
+          "batch": 8,
+          "lengths": [
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512,
+            512
+          ],
+          "max_len": 512,
+          "sum_len": 4096,
+          "padded_over_sum": 1.0,
+          "pages": 264,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 141.79931249964284,
+            "wall_ms_min": 115.45300799843972,
+            "wall_ms_max": 166.90199799995753,
+            "gpu_span_ms": 141.2656478881836,
+            "token_sync_cpu_ms": 0.9108319991355529,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 117.68105050032318,
+            "wall_ms_min": 94.7220460002427,
+            "wall_ms_max": 149.53970599890454,
+            "gpu_span_ms": 117.56505584716797,
+            "token_sync_cpu_ms": 0.492311000925838,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 768,
+              "calls_per_step": 192.0,
+              "span_ms_per_step": 62.401520013809204,
+              "cpu_ms_per_step": 69.65137099268759
+            },
+            "page_write": {
+              "calls": 768,
+              "calls_per_step": 192.0,
+              "span_ms_per_step": 15.815776003990322,
+              "cpu_ms_per_step": 21.50676498604298
+            },
+            "repeat_kv": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 0.24168800280313008,
+              "cpu_ms_per_step": 2.4505697465428966
+            },
+            "weight_gemm": {
+              "calls": 676,
+              "calls_per_step": 169.0,
+              "span_ms_per_step": 14.934728023596108,
+              "cpu_ms_per_step": 16.937782254899503
+            },
+            "gather_padded": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 75.6663915514946,
+              "cpu_ms_per_step": 73.41342150084529
+            },
+            "attn_gemm": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 5.0158239752054214,
+              "cpu_ms_per_step": 6.808693252423836
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "page_gather",
+                "count": 384,
+                "self_device_us": 127933.02000000002,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 3198,
+                "self_device_us": 20217.381999999358,
+                "self_cpu_us": 23072.941999998162
+              },
+              {
+                "name": "page_write",
+                "count": 384,
+                "self_device_us": 19247.137999999773,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 338,
+                "self_device_us": 18863.476999999686,
+                "self_cpu_us": 7924.932000000459
+              },
+              {
+                "name": "weight_gemm",
+                "count": 338,
+                "self_device_us": 18863.476999999686,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::cat",
+                "count": 288,
+                "self_device_us": 18614.602999999956,
+                "self_cpu_us": 3270.1010000002316
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+                "count": 144,
+                "self_device_us": 12903.771999999912,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 1536,
+                "self_device_us": 12029.058000000023,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "gather_padded",
+                "count": 48,
+                "self_device_us": 10280.307999999875,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 96,
+                "self_device_us": 10202.719999999765,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 774,
+                "self_device_us": 9132.985999999999,
+                "self_cpu_us": 13332.656000000574
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 774,
+                "self_device_us": 9132.985999999999,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 96,
+                "self_device_us": 8100.40400000016,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 582,
+                "self_device_us": 7517.210999999523,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 96,
+                "self_device_us": 6908.807000000128,
+                "self_cpu_us": 4880.817000000086
+              },
+              {
+                "name": "attn_gemm",
+                "count": 96,
+                "self_device_us": 6908.807000000128,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+                "count": 192,
+                "self_device_us": 4949.489999999809,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 4569.338999999933,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 2339.4680000001954,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_tn",
+                "count": 2,
+                "self_device_us": 1010.2149999999674,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 484,
+                "self_device_us": 823.4919999999438,
+                "self_cpu_us": 5108.985000000457
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 388,
+                "self_device_us": 644.4389999998766,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 340,
+                "self_device_us": 433.3880000004267,
+                "self_cpu_us": 3759.6700000005985
+              },
+              {
+                "name": "aten::mean",
+                "count": 98,
+                "self_device_us": 387.7220000000334,
+                "self_cpu_us": 1362.5669999998504
+              },
+              {
+                "name": "void at::native::reduce_kernel",
+                "count": 98,
+                "self_device_us": 387.7220000000334,
+                "self_cpu_us": 0
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 6296,
+              "busy_us": 76599.25,
+              "gap_us": 276666.33349609375,
+              "span_us": 353265.5859375,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 5.10136
+                },
+                "page_gather": {
+                  "kernel_count": 2304,
+                  "busy_ms_per_step": 9.718683500000065
+                },
+                "page_write": {
+                  "kernel_count": 768,
+                  "busy_ms_per_step": 0.9963175000000013
+                },
+                "repeat_kv": {
+                  "kernel_count": 0,
+                  "busy_ms_per_step": 0.0
+                },
+                "weight_gemm": {
+                  "kernel_count": 338,
+                  "busy_ms_per_step": 9.431738499999996
+                },
+                "attn_gemm": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 3.4544034999999993
+                }
+              },
+              "other_busy_ms_per_step": 9.597121999999993,
+              "other_top": [
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 4.050202,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 3.7586054999999936,
+                  "count": 582
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.3222194999999997,
+                  "count": 388
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.1938610000000001,
+                  "count": 98
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.15573949999999998,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.14171250000000002,
+                  "count": 242
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.11200299999999998,
+                  "count": 96
+                },
+                {
+                  "name": "void (anonymous namespace)::softmax_warp_forward",
+                  "busy_ms_per_step": 0.08321899999999997,
+                  "count": 48
+                }
+              ]
+            },
+            "busy_ms_per_step": 38.299625,
+            "idle_inside_span_ms": 102.9660228881836
+          }
+        },
+        {
+          "batch": 4,
+          "lengths": [
+            32,
+            32,
+            32,
+            512
+          ],
+          "max_len": 512,
+          "sum_len": 608,
+          "padded_over_sum": 3.3684210526315788,
+          "pages": 42,
+          "block_size": 16,
+          "per_sequence_sync": {
+            "wall_ms": 84.41894099996716,
+            "wall_ms_min": 74.6392309993098,
+            "wall_ms_max": 145.27917099985643,
+            "gpu_span_ms": 84.12596893310547,
+            "token_sync_cpu_ms": 0.6616325008508284,
+            "samples": 20
+          },
+          "one_sync": {
+            "wall_ms": 103.62839849949523,
+            "wall_ms_min": 75.7937660018797,
+            "wall_ms_max": 137.90403500024695,
+            "gpu_span_ms": 103.50325012207031,
+            "token_sync_cpu_ms": 0.48972599870467093,
+            "samples": 20
+          },
+          "regions": {
+            "page_gather": {
+              "calls": 384,
+              "calls_per_step": 96.0,
+              "span_ms_per_step": 31.26329591870308,
+              "cpu_ms_per_step": 36.48365874778392
+            },
+            "page_write": {
+              "calls": 384,
+              "calls_per_step": 96.0,
+              "span_ms_per_step": 8.200560015393421,
+              "cpu_ms_per_step": 10.762482754216762
+            },
+            "repeat_kv": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 0.633160000492353,
+              "cpu_ms_per_step": 2.458762746755383
+            },
+            "weight_gemm": {
+              "calls": 676,
+              "calls_per_step": 169.0,
+              "span_ms_per_step": 16.19083198858425,
+              "cpu_ms_per_step": 16.810845016152598
+            },
+            "gather_padded": {
+              "calls": 96,
+              "calls_per_step": 24.0,
+              "span_ms_per_step": 47.380399972200394,
+              "cpu_ms_per_step": 47.624262997487676
+            },
+            "attn_gemm": {
+              "calls": 192,
+              "calls_per_step": 48.0,
+              "span_ms_per_step": 3.891367999371141,
+              "cpu_ms_per_step": 6.5315422561980085
+            }
+          },
+          "kernels": {
+            "top_self_device": [
+              {
+                "name": "gather_padded",
+                "count": 48,
+                "self_device_us": 96632.48999999993,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "page_gather",
+                "count": 192,
+                "self_device_us": 67557.24999999981,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "weight_gemm",
+                "count": 338,
+                "self_device_us": 19214.55499999922,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mm",
+                "count": 338,
+                "self_device_us": 19143.328999999176,
+                "self_cpu_us": 8416.522000000112
+              },
+              {
+                "name": "aten::cat",
+                "count": 576,
+                "self_device_us": 13974.113999999554,
+                "self_cpu_us": 7923.630000000036
+              },
+              {
+                "name": "page_write",
+                "count": 192,
+                "self_device_us": 10618.659000000252,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                "count": 384,
+                "self_device_us": 9654.748999999789,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+                "count": 240,
+                "self_device_us": 9442.064999999486,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn",
+                "count": 96,
+                "self_device_us": 8587.474999999778,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::copy_",
+                "count": 2038,
+                "self_device_us": 7861.438999999358,
+                "self_cpu_us": 14122.1250000004
+              },
+              {
+                "name": "void at::native::unrolled_elementwise_kernel",
+                "count": 582,
+                "self_device_us": 4465.799999999545,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                "count": 96,
+                "self_device_us": 4007.3049999998148,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::bmm",
+                "count": 96,
+                "self_device_us": 3254.800000000034,
+                "self_cpu_us": 5260.07000000003
+              },
+              {
+                "name": "attn_gemm",
+                "count": 96,
+                "self_device_us": 3254.800000000034,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 768,
+                "self_device_us": 2908.3339999996656,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 1975.126000000112,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::index",
+                "count": 390,
+                "self_device_us": 1767.8000000001748,
+                "self_cpu_us": 6058.176000001131
+              },
+              {
+                "name": "void at::native::vectorized_gather_kernel",
+                "count": 390,
+                "self_device_us": 1767.8000000001748,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "std::enable_if",
+                "count": 48,
+                "self_device_us": 1279.6739999999218,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_tn",
+                "count": 2,
+                "self_device_us": 999.9309999999823,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::fill_",
+                "count": 288,
+                "self_device_us": 962.4570000001595,
+                "self_cpu_us": 2359.9300000001253
+              },
+              {
+                "name": "void at::native::vectorized_elementwise_kernel",
+                "count": 288,
+                "self_device_us": 962.4570000001595,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::mul",
+                "count": 484,
+                "self_device_us": 795.8760000001362,
+                "self_cpu_us": 7310.701999999411
+              },
+              {
+                "name": "void at::native::elementwise_kernel",
+                "count": 388,
+                "self_device_us": 640.7410000000114,
+                "self_cpu_us": 0
+              },
+              {
+                "name": "aten::add",
+                "count": 340,
+                "self_device_us": 422.24700000007056,
+                "self_cpu_us": 4141.615999999888
+              }
+            ],
+            "timeline": {
+              "streams": 1,
+              "kernel_count": 5376,
+              "busy_us": 49786.207,
+              "gap_us": 258652.28857421875,
+              "span_us": 308438.43701171875,
+              "per_step": 2
+            },
+            "busy_by_region": {
+              "regions": {
+                "gather_padded": {
+                  "kernel_count": 672,
+                  "busy_ms_per_step": 5.308603000000003
+                },
+                "page_gather": {
+                  "kernel_count": 1152,
+                  "busy_ms_per_step": 1.8996599999999944
+                },
+                "page_write": {
+                  "kernel_count": 384,
+                  "busy_ms_per_step": 0.5007144999999993
+                },
+                "repeat_kv": {
+                  "kernel_count": 0,
+                  "busy_ms_per_step": 0.0
+                },
+                "weight_gemm": {
+                  "kernel_count": 386,
+                  "busy_ms_per_step": 9.571664499999995
+                },
+                "attn_gemm": {
+                  "kernel_count": 96,
+                  "busy_ms_per_step": 1.6274000000000008
+                }
+              },
+              "other_busy_ms_per_step": 5.985061499999989,
+              "other_top": [
+                {
+                  "name": "void at::native::unrolled_elementwise_kernel",
+                  "busy_ms_per_step": 2.23289999999999,
+                  "count": 582
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized",
+                  "busy_ms_per_step": 2.0036525,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.32037049999999956,
+                  "count": 388
+                },
+                {
+                  "name": "void at::native::reduce_kernel",
+                  "busy_ms_per_step": 0.16913450000000002,
+                  "count": 98
+                },
+                {
+                  "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy",
+                  "busy_ms_per_step": 0.15602999999999997,
+                  "count": 96
+                },
+                {
+                  "name": "void at::native::vectorized_elementwise_kernel",
+                  "busy_ms_per_step": 0.13916949999999995,
+                  "count": 242
+                },
+                {
+                  "name": "void (anonymous namespace)::softmax_warp_forward",
+                  "busy_ms_per_step": 0.11454300000000003,
+                  "count": 48
+                },
+                {
+                  "name": "void at::native::elementwise_kernel",
+                  "busy_ms_per_step": 0.1108955,
+                  "count": 96
+                }
+              ]
+            },
+            "busy_ms_per_step": 24.893103500000002,
+            "idle_inside_span_ms": 59.23286543310547
+          }
+        }
+      ]
+    }
+  }
+}

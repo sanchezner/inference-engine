@@ -3,7 +3,7 @@ export PYTHONPATH := .
 export HF_HUB_DISABLE_PROGRESS_BARS := 1
 export TQDM_DISABLE := 1
 
-.PHONY: check bringup bench-bandwidth
+.PHONY: check bringup bench-bandwidth bench-profile
 
 check:
 	$(PY) checks/config.py
@@ -20,3 +20,6 @@ bringup:
 
 bench-bandwidth:
 	$(PY) bench/bandwidth.py
+
+bench-profile:
+	$(PY) bench/profile.py
