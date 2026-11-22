@@ -6,6 +6,17 @@ A from-scratch inference runtime I'm building to get a deeper understanding of i
 
 ## log:
 
+**<ins>2026-11-21</ins> ~ A model big enough to time**
+
+SmolLM2-1.7B is in `make check`, and baselines are recorded (will make sense later).
+
+| 1.7B decode, bf16, context 128 | batch 1 | batch 8 |
+|---|---|---|
+| Hugging Face `generate` | 36 tok/s | 298 tok/s |
+| this engine | 17 tok/s | 66 tok/s |
+
+The 135M model stopped being useful for timing as it gave the GPU too little work to measure, so I swapped it for the 1.7B, which runs on the same loader. fp32 doesn't fit on the 3070, so CUDA bf16 is scored against the CPU run over 400 positions w/ a mean KL 2.09e-3, top-1 98%; limits are in `tests/thresholds.toml`.
+
 **<ins>2026-10-24</ins> ~ Off the Hugging Face module**
 
 The Llama runtime loads its own config and safetensors and no longer reads a Hugging Face module. The uncached forward and the page pool run on CPU fp32, CUDA fp32, and CUDA bf16 on the RTX 3070. fp32 greedy output matches Hugging Face, including the out-of-order block table `[4, 5, 1]`. bf16 is scored by KL and teacher-forced top-1, and the first measured limits are frozen in `tests/thresholds.toml`. Page state is a `PagePool` and a `Sequence`. The dense cache stays in `engine/legacy/` as the CPU ablation.
