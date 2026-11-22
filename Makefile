@@ -7,6 +7,8 @@ export TQDM_DISABLE := 1
 
 check:
 	$(PY) tests/sched/engine_core.py
+	$(PY) tests/sched/trace.py
+	$(PY) checks/trace.py
 	$(PY) checks/config.py
 	$(PY) checks/roofline.py
 	$(PY) checks/weights.py

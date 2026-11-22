@@ -56,9 +56,16 @@ def new_page_cache(cfg: ModelConfig, n_pages: int, block_size: int, *, device, d
     return new_sequence(new_page_pool(cfg, n_pages, block_size, device=device, dtype=dtype))
 
 
+def pages_for(block_size: int, total_len: int) -> int:
+    # Admission counts with this same ceiling, so a seated request cannot pop an empty free list.
+    if total_len <= 0:
+        return 0
+    return (total_len + block_size - 1) // block_size
+
+
 def reserve_pages(seq: Sequence, total_len: int) -> None:
     pool = seq.pool
-    need = (total_len + pool.block_size - 1) // pool.block_size
+    need = pages_for(pool.block_size, total_len)
     while len(seq.blocks) < need:
         seq.blocks.append(pool.free.pop(0))
 

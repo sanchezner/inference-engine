@@ -1,9 +1,11 @@
+import random
+
 import torch
 
 from engine.paged import PagePool, reserve_pages
 from engine.schedule import generate_continuous_paged
 from engine.sched.engine_core import EngineCore
-from engine.sched.request import Request, SamplingParams
+from engine.sched.request import QueueFull, Request, SamplingParams
 
 VOCAB = 32
 
@@ -16,8 +18,13 @@ def main():
     _budget_one_frees_pages()
     _abort_waiting_running_and_unknown()
     _duplicate_id_is_rejected_until_the_output_is_delivered()
+    _never_fits_is_rejected()
+    _reserve_max_keeps_growth_pages()
+    _oldest_waiter_blocks_a_smaller_one()
     _timestamps_are_ordered()
     _idle_stats_echo_the_pool()
+    _queue_cap_refuses_the_next_waiter()
+    _interleaving_conserves_pages()
 
 
 def _rejects_bad_requests():
@@ -178,6 +185,85 @@ def _duplicate_id_is_rejected_until_the_output_is_delivered():
     assert engine.stats().requests_waiting == 1
 
 
+def _never_fits_is_rejected():
+    pool = _pool(1, 4)
+    engine = _engine(pool, max_batch=2)
+    # 1 + 8 - 1 = 8 tokens, two pages. The prompt itself would fit in the one page.
+    engine.add_request(Request("nope", (1,), max_new_tokens=8))
+    try:
+        engine.add_request(Request("nope", (1,), max_new_tokens=1))
+    except ValueError as exc:
+        assert "already" in str(exc)
+    else:
+        raise AssertionError("rejected id was reused before its output was delivered")
+    engine.add_request(Request("ok", (2,), max_new_tokens=1))
+    stats = engine.stats()
+    assert stats.counters.requests_rejected == 1
+    assert stats.requests_waiting == 1
+    assert stats.blocks_free == 1
+
+    outs = engine.step()
+    assert [(out.request_id, out.token_id, out.finish_reason) for out in outs] == [
+        ("nope", None, "rejected"),
+        ("ok", 3, "length"),
+    ]
+    assert engine.stats().blocks_free == 1
+    assert engine.stats().counters.requests_finished == 1
+    assert engine.stats().counters.tokens_generated == 1
+    engine.add_request(Request("nope", (3, 3, 3, 3, 3), max_new_tokens=1))
+    assert engine.stats().counters.requests_rejected == 2
+    assert engine.stats().requests_waiting == 0
+    again = engine.step()
+    assert len(again) == 1 and again[0].finish_reason == "rejected" and again[0].token_id is None
+    assert engine.stats().blocks_free == 1
+    _conserved(pool, engine)
+
+
+def _reserve_max_keeps_growth_pages():
+    # grow ends on 2 pages. hold needs 1, and that page is still free after grow's prefill.
+    pool = _pool(2, 4)
+    engine = _engine(pool, max_batch=2)
+    engine.add_request(Request("grow", (1, 1, 1, 1), max_new_tokens=5))
+    engine.add_request(Request("hold", (2,), max_new_tokens=4))
+    first = engine.step()
+    assert [(out.request_id, out.token_id) for out in first] == [("grow", 2), ("grow", 3)]
+    assert engine.stats().requests_waiting == 1
+    assert engine.stats().requests_running == 1
+    assert engine.stats().blocks_free == 0
+    outs = first + _collect(engine)
+    assert [(out.request_id, out.token_id, out.finish_reason) for out in outs] == [
+        ("grow", 2, None),
+        ("grow", 3, None),
+        ("grow", 4, None),
+        ("grow", 5, None),
+        ("grow", 6, "length"),
+        ("hold", 3, None),
+        ("hold", 4, None),
+        ("hold", 5, None),
+        ("hold", 6, "length"),
+    ]
+    assert engine.stats().blocks_free == 2
+
+
+def _oldest_waiter_blocks_a_smaller_one():
+    # After anchor's first step one page is free. thin would fit; wide, in front of it, would not.
+    pool = _pool(3, 4)
+    engine = _engine(pool, max_batch=2)
+    engine.add_request(Request("anchor", (1, 1, 1, 1), max_new_tokens=5))
+    engine.add_request(Request("wide", (2, 2, 2, 2, 2), max_new_tokens=5))
+    engine.add_request(Request("thin", (3,), max_new_tokens=1))
+    first = engine.step()
+    assert [out.request_id for out in first] == ["anchor", "anchor"]
+    stats = engine.stats()
+    assert stats.requests_waiting == 2
+    assert stats.requests_running == 1
+    assert stats.blocks_free == 1
+    outs = first + _collect(engine)
+    assert [out.request_id for out in outs] == ["anchor"] * 5 + ["wide"] * 5 + ["thin"]
+    assert [(out.token_id, out.finish_reason) for out in outs if out.request_id == "thin"] == [(4, "length")]
+    assert engine.stats().blocks_free == 3
+
+
 def _timestamps_are_ordered():
     clock = _Clock()
     engine = _engine(_pool(8, 4), max_batch=1, clock=clock)
@@ -210,6 +296,89 @@ def _idle_stats_echo_the_pool():
     assert engine.step() == []
 
 
+def _queue_cap_refuses_the_next_waiter():
+    pool = _pool(8, 4)
+    try:
+        _engine(pool, max_batch=1, max_waiting=0)
+    except ValueError as exc:
+        assert "max_waiting" in str(exc)
+    else:
+        raise AssertionError("max_waiting of 0 was accepted")
+
+    engine = _engine(pool, max_batch=1, max_waiting=1)
+    engine.add_request(Request("a", (1, 1, 1, 1), max_new_tokens=6))
+    # 40 tokens need 10 pages. The pool has 8, so this never waits and never takes the one seat.
+    engine.add_request(Request("huge", (2,) * 40, max_new_tokens=1))
+    assert engine.stats().requests_waiting == 1
+    assert engine.stats().counters.requests_rejected == 1
+    try:
+        engine.add_request(Request("b", (3,), max_new_tokens=2))
+    except QueueFull as exc:
+        assert exc.waiting == 1 and exc.max_waiting == 1
+    else:
+        raise AssertionError("a full queue accepted another waiter")
+    try:
+        engine.add_request(Request("a", (3,), max_new_tokens=1))
+    except ValueError as exc:
+        assert "already" in str(exc)
+    else:
+        raise AssertionError("duplicate id on a full queue was accepted")
+
+    engine.step()
+    assert engine.stats().requests_waiting == 0
+    engine.add_request(Request("b", (3,), max_new_tokens=2))
+    assert engine.stats().requests_waiting == 1
+    _conserved(pool, engine)
+
+
+def _interleaving_conserves_pages():
+    for seed in range(8):
+        _one_interleaving(seed)
+
+
+def _one_interleaving(seed):
+    # Six pages cannot cover three fat requests at once, so some have to wait.
+    rng = random.Random(seed)
+    pool = _pool(6, 4)
+    engine = _engine(pool, max_batch=3, max_waiting=5)
+    accepted = []
+    for _ in range(250):
+        roll = rng.randrange(3)
+        if roll == 0:
+            rid = f"s{seed}-n{len(accepted)}"
+            if rng.randrange(10) == 0:
+                req = Request(rid, (1,) * 25, max_new_tokens=1)
+            else:
+                prompt = tuple(rng.randrange(VOCAB) for _ in range(rng.randint(1, 8)))
+                req = Request(rid, prompt, max_new_tokens=rng.randint(1, 8))
+            try:
+                engine.add_request(req)
+            except QueueFull as exc:
+                assert exc.waiting == engine.max_waiting
+                assert engine.stats().requests_waiting == engine.max_waiting
+            else:
+                accepted.append(rid)
+        elif roll == 1:
+            engine.step()
+        elif accepted:
+            engine.abort(rng.choice(accepted))
+        _conserved(pool, engine)
+
+    for rid in accepted:
+        engine.abort(rid)
+    engine.step()
+    assert engine.step() == []
+    stats = engine.stats()
+    assert stats.requests_waiting == 0 and stats.requests_running == 0
+    assert stats.blocks_free == stats.blocks_total
+    counters = stats.counters
+    assert (
+        counters.requests_finished + counters.requests_aborted + counters.requests_rejected
+        == len(accepted)
+    )
+    _conserved(pool, engine)
+
+
 class _Clock:
     def __init__(self):
         self.t = 0.0
@@ -219,8 +388,8 @@ class _Clock:
         return self.t
 
 
-def _engine(pool, max_batch, clock=None):
-    return EngineCore(_forward_one, _forward_batch, pool, max_batch, clock=clock)
+def _engine(pool, max_batch, clock=None, max_waiting=256):
+    return EngineCore(_forward_one, _forward_batch, pool, max_batch, clock=clock, max_waiting=max_waiting)
 
 
 def _pool(n_pages, block_size):
@@ -264,6 +433,18 @@ def _expect(prompt, budget, stop=()):
         if last in stop:
             break
     return tokens
+
+
+def _collect(engine):
+    outs = []
+    for _ in range(32):
+        step_outs = engine.step()
+        outs.extend(step_outs)
+        stats = engine.stats()
+        _conserved(engine.pool, engine)
+        if not step_outs and stats.requests_waiting == 0 and stats.requests_running == 0:
+            return outs
+    raise AssertionError("engine did not finish")
 
 
 def _drain(engine):

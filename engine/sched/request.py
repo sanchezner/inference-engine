@@ -1,6 +1,14 @@
 from dataclasses import dataclass, field
 
 
+# The waiting rail is full. The caller retries; the id was not taken.
+class QueueFull(Exception):
+    def __init__(self, waiting: int, max_waiting: int):
+        self.waiting = waiting
+        self.max_waiting = max_waiting
+        super().__init__(f"waiting queue is full ({waiting}/{max_waiting})")
+
+
 # Only greedy is legal until M5. A non-zero temperature must fail here, not silently argmax.
 @dataclass(frozen=True)
 class SamplingParams:

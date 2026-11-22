@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from engine.paged import Sequence, new_sequence, release_pages
-from engine.sched.request import EngineCounters, EngineStats, OutputTimestamps, Request, StepOutput
+from engine.paged import Sequence, new_sequence, pages_for, release_pages
+from engine.sched.request import EngineCounters, EngineStats, OutputTimestamps, QueueFull, Request, StepOutput
 
 
 @dataclass
@@ -27,13 +27,16 @@ class _Running:
 
 # Ticket window in front of the paged loop. No threads: the caller decides when a step runs.
 class EngineCore:
-    def __init__(self, forward_one, forward_batch, pool, max_batch, clock=None):
+    def __init__(self, forward_one, forward_batch, pool, max_batch, clock=None, max_waiting=256):
         if isinstance(max_batch, bool) or not isinstance(max_batch, int) or max_batch < 1:
             raise ValueError(f"max_batch must be an int >= 1, got {max_batch!r}")
+        if isinstance(max_waiting, bool) or not isinstance(max_waiting, int) or max_waiting < 1:
+            raise ValueError(f"max_waiting must be an int >= 1, got {max_waiting!r}")
         self.forward_one = forward_one
         self.forward_batch = forward_batch
         self.pool = pool
         self.max_batch = max_batch
+        self.max_waiting = max_waiting
         self.clock = time.perf_counter if clock is None else clock
         self._waiting = deque()
         self._running = []
@@ -41,7 +44,6 @@ class EngineCore:
         self._held = set()
         self._finished = 0
         self._aborted = 0
-        # Reserve-max is the next bullet. Until then a request that cannot fit still crashes in reserve_pages.
         self._rejected = 0
         self._tokens = 0
 
@@ -50,8 +52,19 @@ class EngineCore:
             raise TypeError(f"add_request expected Request, got {type(req).__name__}")
         if req.request_id in self._held:
             raise ValueError(f"request {req.request_id!r} is already in the engine")
+        arrival = self.clock()
+        # Bigger than the whole pool, not merely bigger than what is free right now.
+        # Does not take a waiting seat: the server maps this to "never fits", not "line full".
+        if self._demand(len(req.prompt_token_ids), req.max_new_tokens) > self.pool.k.shape[1]:
+            self._held.add(req.request_id)
+            self._pending.append(self._terminal(req.request_id, "rejected", arrival))
+            self._rejected += 1
+            return
+        if len(self._waiting) >= self.max_waiting:
+            # Not held, so the caller may retry this same id once a seat frees.
+            raise QueueFull(len(self._waiting), self.max_waiting)
         self._held.add(req.request_id)
-        self._waiting.append(_Waiting(req, self.clock()))
+        self._waiting.append(_Waiting(req, arrival))
 
     # Pages are freed here. The abort output waits for the next step so tokens and finishes share one stream.
     def abort(self, request_id: str) -> None:
@@ -103,7 +116,32 @@ class EngineCore:
 
     def _admit(self, outputs: list[StepOutput]) -> None:
         while len(self._running) < self.max_batch and self._waiting:
-            outputs.extend(self._prefill(self._waiting.popleft()))
+            item = self._waiting[0]
+            req = item.request
+            if self._demand(len(req.prompt_token_ids), req.max_new_tokens) > self._slack():
+                # Oldest first. A ticket that does not fit blocks the ones behind it.
+                break
+            self._waiting.popleft()
+            outputs.extend(self._prefill(item))
+
+    def _demand(self, prompt_len: int, max_new_tokens: int) -> int:
+        # The token just sampled is written on the next decode, so the cache stops one short of the budget.
+        return pages_for(self.pool.block_size, prompt_len + max_new_tokens - 1)
+
+    def _slack(self) -> int:
+        # Free pages minus the growth running sequences are already promised.
+        owed = sum(self._owed(slot) for slot in self._running)
+        free = len(self.pool.free)
+        if owed > free:
+            raise RuntimeError(f"running sequences are owed {owed} pages but only {free} are free")
+        return free - owed
+
+    def _owed(self, slot: _Running) -> int:
+        final = slot.seq.seq_len + (slot.max_new_tokens - slot.generated)
+        owed = pages_for(self.pool.block_size, final) - len(slot.seq.blocks)
+        if owed < 0:
+            raise RuntimeError(f"request {slot.request_id} holds more pages than its budget can use")
+        return owed
 
     def _prefill(self, item: _Waiting) -> list[StepOutput]:
         req = item.request
