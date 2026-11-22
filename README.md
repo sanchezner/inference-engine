@@ -6,6 +6,10 @@ A from-scratch inference runtime I'm building to get a deeper understanding of i
 
 ## log:
 
+**<ins>2026-11-22</ins> ~ A ticket window**
+
+Vroom vroom. We have an engine now, and it can take a request, run a step, and cancel it, instead of getting the whole batch up front. A request can only be taken when the page pool can hold its prompt and every token it's allowed to generate; one that can't fit is rejected, and a line waiting longer than 256 is also rejected. A trace replayer submits on the clock and records time to first token as well as the gap between tokens. On SmolLM2-135M (yes, I know.. this is only to test exactness), twenty requests w/ five cancelled midway match offline greedy on the ones that actually finish, and the page pool is full again when the engine is idle.
+
 **<ins>2026-11-21</ins> ~ A model big enough to time**
 
 SmolLM2-1.7B is in `make check`, and baselines are recorded (will make sense later).
