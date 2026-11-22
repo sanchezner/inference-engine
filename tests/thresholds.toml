@@ -9,3 +9,12 @@
 [cuda-bf16]
 mean_kl_max = 5.0e-3
 top1_min = 0.90
+
+# SmolLM2-1.7B, CUDA bf16 vs CPU fp32 HF eager, RTX 3070 WSL2, torch 2.14.1+cu132, 2026-11-11.
+# 20 prompts x 20 tokens, EOS ignored: 400 positions. KL is the mean over all 400.
+# Measured: uncached KL 2.084e-3 top-1 0.985; paged KL 2.090e-3 top-1 0.980.
+# One "Hello" row is KL ~0.66 with the argmax still right, so the cap sits above the mean.
+# A dot in the header would nest the table, so the name is cuda-bf16-1_7b.
+[cuda-bf16-1_7b]
+mean_kl_max = 8.0e-3
+top1_min = 0.96
