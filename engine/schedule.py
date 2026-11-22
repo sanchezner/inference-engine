@@ -1,59 +1,42 @@
 import torch
-from engine.paged import new_sequence, release_pages
+
+from engine.sched.engine_core import EngineCore
+from engine.sched.request import Request
 
 
-# prefills a request into fresh pages via single sequence forward, samples its first token, and returns live slot or retires it
-def admit_paged(forward_one, pool, req, outputs, eos_id):
-    seq = new_sequence(pool)
-    logits, seq = forward_one(req["prompt"].view(1, -1), seq)
-    tok = torch.argmax(logits, dim=-1)[0].to(device=req["prompt"].device)
-    ids = torch.cat([req["prompt"], tok.view(1)])
-
-    if tok.item() == eos_id or req["budget"] == 1:
-        outputs[req["index"]] = ids
-        release_pages(seq)
-        return None
-
-    return {
-        "index": req["index"],
-        "seq": seq,
-        "ids": ids,
-        "generated": 1,
-        "budget": req["budget"],
-    }
-
-
-# admit, step, retire loop
+# One-shot driver over EngineCore so the paged check can still hand every prompt in up front.
 def generate_continuous_paged(forward_one, forward_batch, pool, prompts, budgets, eos_id, max_batch):
-    waiting = [{"prompt": p, "budget": b, "index": i} for i, (p, b) in enumerate(zip(prompts, budgets))]
-    slots = []
-    outputs = [None] * len(prompts)
+    prompts = list(prompts)
+    budgets = list(budgets)
+    core = EngineCore(forward_one, forward_batch, pool, max_batch)
+    for index, (prompt, budget) in enumerate(zip(prompts, budgets)):
+        core.add_request(Request(
+            request_id=str(index),
+            prompt_token_ids=prompt.tolist(),
+            max_new_tokens=budget,
+            stop_token_ids=(eos_id,),
+        ))
 
-    while waiting or slots:
-        while len(slots) < max_batch and waiting:
-            slot = admit_paged(forward_one, pool, waiting.pop(0), outputs, eos_id)
-            if slot is not None:
-                slots.append(slot)
+    generated = {str(index): [] for index in range(len(prompts))}
+    steps = 0
+    limit = sum(budgets) + len(prompts) + 1
+    while True:
+        # Step before the idle check, so a finish queued onto an idle engine is still delivered.
+        if steps > limit:
+            raise RuntimeError("paged generate exceeded its step budget")
+        steps += 1
+        for out in core.step():
+            if out.token_id is not None:
+                generated[out.request_id].append(out.token_id)
+        stats = core.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
 
-        if not slots:
-            continue
-
-        last = torch.stack([s["ids"][-1] for s in slots]).view(-1, 1)
-        logits, _ = forward_batch(last, [s["seq"] for s in slots])
-        next_id = torch.argmax(logits, dim=-1)
-        alive = []
-
-        for i, slot in enumerate(slots):
-            tok = next_id[i].to(device=slot["ids"].device)
-            slot["ids"] = torch.cat([slot["ids"], tok.view(1)])
-            slot["generated"] += 1
-
-            if tok.item() == eos_id or slot["generated"] == slot["budget"]:
-                outputs[slot["index"]] = slot["ids"]
-                release_pages(slot["seq"])
-            else:
-                alive.append(slot)
-
-        slots = alive
-
-    return outputs
+    return [
+        torch.tensor(
+            list(prompts[index].tolist()) + generated[str(index)],
+            dtype=prompts[index].dtype,
+            device=prompts[index].device,
+        )
+        for index in range(len(prompts))
+    ]
