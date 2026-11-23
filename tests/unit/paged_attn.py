@@ -29,6 +29,8 @@ def main():
     _batch_matches_each_row_alone()
     _strides_are_honored()
     _decode_forward_matches_gather()
+    _prefill_write_matches_page_write()
+    _multitoken_batch_write_matches_page_write()
 
 
 def _rejects_bad_arguments():
@@ -215,20 +217,96 @@ def _tiny_model(dtype, n_heads, n_kv, seed):
     return cfg, weights, RopeTables.build(cfg, "cuda")
 
 
+def _prefill_write_matches_page_write():
+    # Nine tokens fill two pages and one slot of the third. The rest of that page stays NaN.
+    for dtype in (torch.float32, torch.bfloat16):
+        for preset in (None, [4, 5, 1]):
+            cfg, weights, rope = _tiny_model(dtype, n_heads=8, n_kv=2, seed=5)
+            pool = new_page_pool(cfg, n_pages=16, block_size=4, device="cuda", dtype=dtype)
+            seq = new_sequence(pool)
+            if preset is not None:
+                seq.blocks = list(preset)
+            pool.k[:] = float("nan")
+            pool.v[:] = float("nan")
+            ids = torch.randint(0, cfg.vocab_size, (1, 9), device="cuda", generator=_gen(4))
+            snap = _snap([seq])
+            got, _ = _assert_no_page_write(lambda: forward_paged(weights, cfg, rope, ids, seq))
+            written = (pool.k.clone(), pool.v.clone(), list(seq.blocks), seq.seq_len)
+            _restore([seq], snap)
+            ref, _ = _forcing_page_write(lambda: forward_paged(weights, cfg, rope, ids, seq))
+            _close(got, ref, 0.0, f"prefill logits {dtype} {preset}")
+            assert list(seq.blocks) == written[2]
+            assert seq.seq_len == written[3]
+            _same_pages(pool.k, written[0], 0.0, f"prefill k {dtype} {preset}")
+            _same_pages(pool.v, written[1], 0.0, f"prefill v {dtype} {preset}")
+
+
+def _multitoken_batch_write_matches_page_write():
+    for dtype in (torch.float32, torch.bfloat16):
+        cfg, weights, rope = _tiny_model(dtype, n_heads=8, n_kv=2, seed=6)
+        pool = new_page_pool(cfg, n_pages=16, block_size=4, device="cuda", dtype=dtype)
+        seqs = [new_sequence(pool) for _ in range(2)]
+        for seq, n, seed in zip(seqs, (1, 5), (1, 2)):
+            ids = torch.randint(0, cfg.vocab_size, (1, n), device="cuda", generator=_gen(seed))
+            _forcing_page_write(lambda: forward_paged(weights, cfg, rope, ids, seq))
+        seqs[1].blocks = [seqs[1].blocks[1], seqs[1].blocks[0]]
+        pool.k[:, 15] = float("nan")
+        pool.v[:, 15] = float("nan")
+        snap = _snap(seqs)
+        new_ids = torch.randint(0, cfg.vocab_size, (2, 3), device="cuda", generator=_gen(8))
+        got, _ = _assert_no_page_write(lambda: forward_paged_batch(weights, cfg, rope, new_ids, seqs))
+        written = (pool.k.clone(), pool.v.clone(), [list(s.blocks) for s in seqs], [s.seq_len for s in seqs])
+        _restore(seqs, snap)
+        ref, _ = _forcing_page_write(lambda: forward_paged_batch(weights, cfg, rope, new_ids, seqs))
+        _close(got, ref, 0.0, f"batch write logits {dtype}")
+        assert [list(s.blocks) for s in seqs] == written[2]
+        assert [s.seq_len for s in seqs] == written[3]
+        _same_pages(pool.k, written[0], 0.0, f"batch write k {dtype}")
+        _same_pages(pool.v, written[1], 0.0, f"batch write v {dtype}")
+
+
 def _assert_decode_does_not_gather(fn):
     saved_gather = paged.page_gather
     saved_padded = paged.gather_padded
+    saved_write = paged.page_write
 
-    def boom(*_args, **_kwargs):
+    def boom_gather(*_args, **_kwargs):
         raise AssertionError("decode step gathered pages")
 
-    paged.page_gather = boom
-    paged.gather_padded = boom
+    def boom_write(*_args, **_kwargs):
+        raise AssertionError("decode step looped over page_write")
+
+    paged.page_gather = boom_gather
+    paged.gather_padded = boom_gather
+    paged.page_write = boom_write
     try:
         return fn()
     finally:
         paged.page_gather = saved_gather
         paged.gather_padded = saved_padded
+        paged.page_write = saved_write
+
+
+def _assert_no_page_write(fn):
+    saved = paged.page_write
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("cuda write looped over page_write")
+
+    paged.page_write = boom
+    try:
+        return fn()
+    finally:
+        paged.page_write = saved
+
+
+def _forcing_page_write(fn):
+    saved = paged.cache_supported
+    paged.cache_supported = lambda *_args, **_kwargs: False
+    try:
+        return fn()
+    finally:
+        paged.cache_supported = saved
 
 
 def _forcing_gather(fn):

@@ -7,6 +7,7 @@ export TQDM_DISABLE := 1
 
 check:
 	$(PY) tests/unit/paged_attn.py
+	$(PY) tests/unit/reshape_cache.py
 	$(PY) tests/sched/engine_core.py
 	$(PY) tests/sched/trace.py
 	$(PY) checks/trace.py
