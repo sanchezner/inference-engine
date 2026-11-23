@@ -13,12 +13,15 @@ from engine.weights import Weights
 # anyone else. k and v are [layer, page, kv_head, slot, dim].
 # CUDA writes the new K/V with one scatter. One new token reads the pages.
 # A prefill with no prefix uses SDPA. A prefix still copies pages (page_gather).
+# refcount is how many sequences hold the page. Zero is free, or cached when a prefix still names it.
 @dataclass
 class PagePool:
     k: torch.Tensor
     v: torch.Tensor
     free: list[int]
     block_size: int
+    refcount: list[int] = field(default_factory=list)
+    cache: object = None
 
     def __post_init__(self):
         if self.k.shape != self.v.shape or self.k.ndim != 5:
@@ -30,6 +33,11 @@ class PagePool:
             raise ValueError(f"free list must start as every page id, got {self.free}")
         if self.block_size <= 0:
             raise ValueError(f"block_size must be positive, got {self.block_size}")
+        if self.refcount:
+            if len(self.refcount) != n_pages:
+                raise ValueError(f"refcount length {len(self.refcount)} does not match {n_pages} pages")
+        else:
+            self.refcount = [0] * n_pages
 
 
 @dataclass
@@ -69,16 +77,64 @@ def reserve_pages(seq: Sequence, total_len: int) -> None:
     pool = seq.pool
     need = pages_for(pool.block_size, total_len)
     while len(seq.blocks) < need:
-        seq.blocks.append(pool.free.pop(0))
+        seq.blocks.append(take_page(pool))
 
 
 def release_pages(seq: Sequence) -> None:
     # Sort so the next pop is the lowest id. The block-table checks rely on that,
     # including the out-of-order reuse [4, 5, 1].
     pool = seq.pool
-    pool.free.extend(seq.blocks)
-    pool.free.sort()
+    recycled = []
+    for page in seq.blocks:
+        pool.refcount[page] -= 1
+        if pool.refcount[page] > 0:
+            continue
+        if pool.refcount[page] < 0:
+            raise RuntimeError(f"page {page} refcount went negative")
+        cache = pool.cache
+        if cache is not None and cache.holds(page):
+            # A full block someone might reuse stays out of the free list until it is the oldest.
+            cache.mark_evictable(page)
+            continue
+        recycled.append(page)
     seq.blocks = []
+    if recycled:
+        pool.free.extend(recycled)
+        pool.free.sort()
+
+
+def take_page(pool: PagePool) -> int:
+    # Free pages first. A cached prefix is only overwritten once nothing free is left.
+    if not pool.free:
+        cache = pool.cache
+        evicted = None if cache is None else cache.evict()
+        if evicted is None:
+            pool.free.pop(0)
+        else:
+            if pool.refcount[evicted] != 0:
+                raise RuntimeError(f"evicted page {evicted} still has refcount {pool.refcount[evicted]}")
+            pool.free.append(evicted)
+    page = pool.free.pop(0)
+    if pool.refcount[page] != 0:
+        raise RuntimeError(f"free page {page} has refcount {pool.refcount[page]}")
+    pool.refcount[page] = 1
+    return page
+
+
+def pin_page(pool: PagePool, page: int) -> None:
+    cache = pool.cache
+    if cache is None or not cache.holds(page):
+        raise RuntimeError(f"page {page} is not a cached prefix block")
+    if pool.refcount[page] == 0 and page in pool.free:
+        raise RuntimeError(f"page {page} is on the free list")
+    pool.refcount[page] += 1
+    cache.unmark(page)
+
+
+def available_pages(pool: PagePool) -> int:
+    # Pages nobody is reading can be taken. Cached ones are included because allocation evicts them.
+    cached = 0 if pool.cache is None else pool.cache.evictable_count()
+    return len(pool.free) + cached
 
 
 def page_write(seq: Sequence, layer: int, k_new, v_new, start: int) -> None:

@@ -471,16 +471,18 @@ def _snap(seqs):
         pool.k.clone(),
         pool.v.clone(),
         list(pool.free),
+        list(pool.refcount),
         [(list(seq.blocks), seq.seq_len) for seq in seqs],
     )
 
 
 def _restore(seqs, snap):
-    k, v, free, states = snap
+    k, v, free, refcount, states = snap
     pool = seqs[0].pool
     pool.k.copy_(k)
     pool.v.copy_(v)
     pool.free[:] = free
+    pool.refcount[:] = refcount
     for seq, (blocks, n) in zip(seqs, states):
         seq.blocks[:] = blocks
         seq.seq_len = n

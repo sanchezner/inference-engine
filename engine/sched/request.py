@@ -60,12 +60,14 @@ class OutputTimestamps:
 
 
 # finish_reason is None while the request continues, else stop, length, abort, or rejected.
+# cached_tokens is non-zero only on the first output of a hit: prompt tokens reused, not recomputed.
 @dataclass(frozen=True)
 class StepOutput:
     request_id: str
     token_id: int | None
     finish_reason: str | None
     timestamps: OutputTimestamps
+    cached_tokens: int = 0
 
 
 @dataclass(frozen=True)

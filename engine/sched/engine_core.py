@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from engine.paged import Sequence, new_sequence, pages_for, release_pages
+from engine.kv.prefix_cache import match_prefix, publish_written
+from engine.paged import Sequence, available_pages, new_sequence, pages_for, pin_page, release_pages
 from engine.sched.request import EngineCounters, EngineStats, OutputTimestamps, QueueFull, Request, StepOutput
 
 
@@ -23,6 +24,7 @@ class _Running:
     max_new_tokens: int
     stop_ids: frozenset[int]
     arrival: float
+    written: list[int]
 
 
 # Ticket window in front of the paged loop. No threads: the caller decides when a step runs.
@@ -46,6 +48,8 @@ class EngineCore:
         self._aborted = 0
         self._rejected = 0
         self._tokens = 0
+        self._hit_tokens = 0
+        self._query_tokens = 0
 
     def add_request(self, req: Request) -> None:
         if not isinstance(req, Request):
@@ -103,7 +107,7 @@ class EngineCore:
             requests_waiting=len(self._waiting),
             requests_running=len(self._running),
             blocks_total=self.pool.k.shape[1],
-            blocks_free=len(self.pool.free),
+            blocks_free=available_pages(self.pool),
             block_size=self.pool.block_size,
             pending_prefill_tokens=pending,
             counters=EngineCounters(
@@ -111,6 +115,8 @@ class EngineCore:
                 requests_aborted=self._aborted,
                 requests_rejected=self._rejected,
                 tokens_generated=self._tokens,
+                prefix_cache_hit_tokens=self._hit_tokens,
+                prefix_cache_query_tokens=self._query_tokens,
             ),
         )
 
@@ -118,23 +124,32 @@ class EngineCore:
         while len(self._running) < self.max_batch and self._waiting:
             item = self._waiting[0]
             req = item.request
-            if self._demand(len(req.prompt_token_ids), req.max_new_tokens) > self._slack():
+            blocks, cached_tokens = match_prefix(self.pool.cache, req.prompt_token_ids)
+            fresh = self._demand(len(req.prompt_token_ids), req.max_new_tokens) - len(blocks)
+            if fresh < 0:
+                raise RuntimeError(
+                    f"prefix hit of {len(blocks)} pages exceeds the page budget of request {req.request_id!r}"
+                )
+            if fresh > self._slack(set(blocks)):
                 # Oldest first. A ticket that does not fit blocks the ones behind it.
                 break
             self._waiting.popleft()
-            outputs.extend(self._prefill(item))
+            outputs.extend(self._prefill(item, blocks, cached_tokens))
 
     def _demand(self, prompt_len: int, max_new_tokens: int) -> int:
         # The token just sampled is written on the next decode, so the cache stops one short of the budget.
         return pages_for(self.pool.block_size, prompt_len + max_new_tokens - 1)
 
-    def _slack(self) -> int:
-        # Free pages minus the growth running sequences are already promised.
+    def _slack(self, keep: set[int] | None = None) -> int:
+        # Spare pages are the free list plus cached blocks we may evict, excluding the hit about to be pinned.
+        keep = set() if keep is None else keep
+        cache = self.pool.cache
+        evictable = 0 if cache is None else cache.evictable_excluding(keep)
         owed = sum(self._owed(slot) for slot in self._running)
-        free = len(self.pool.free)
-        if owed > free:
-            raise RuntimeError(f"running sequences are owed {owed} pages but only {free} are free")
-        return free - owed
+        available = len(self.pool.free) + evictable
+        if owed > available:
+            raise RuntimeError(f"running sequences are owed {owed} pages but only {available} are available")
+        return available - owed
 
     def _owed(self, slot: _Running) -> int:
         final = slot.seq.seq_len + (slot.max_new_tokens - slot.generated)
@@ -143,15 +158,29 @@ class EngineCore:
             raise RuntimeError(f"request {slot.request_id} holds more pages than its budget can use")
         return owed
 
-    def _prefill(self, item: _Waiting) -> list[StepOutput]:
+    def _prefill(self, item: _Waiting, blocks: list[int], cached_tokens: int) -> list[StepOutput]:
         req = item.request
         seq = new_sequence(self.pool)
-        # forward_one reads the whole prompt. The decode forward reads one new token.
+        if blocks:
+            for page in blocks:
+                pin_page(self.pool, page)
+            seq.blocks = list(blocks)
+            seq.seq_len = cached_tokens
+        # forward_one reads the whole prompt and scores only the tokens after seq_len.
         ids = torch.tensor(req.prompt_token_ids, dtype=torch.long).view(1, -1)
         logits, seq = self.forward_one(ids, seq)
+        written = list(req.prompt_token_ids)
+        if seq.seq_len != len(written):
+            raise RuntimeError(
+                f"request {req.request_id!r} prefill wrote {seq.seq_len} tokens of a {len(written)}-token prompt"
+            )
+        publish_written(self.pool.cache, seq.blocks, written)
+        if self.pool.cache is not None:
+            self._hit_tokens += cached_tokens
+            self._query_tokens += len(written)
         token = int(torch.argmax(logits, dim=-1).reshape(-1)[0].item())
         reason = _finish_reason(token, 1, req.max_new_tokens, req.stop_token_ids)
-        output = self._token(req.request_id, token, reason, item.arrival)
+        output = self._token(req.request_id, token, reason, item.arrival, cached_tokens)
         if reason is None:
             self._running.append(_Running(
                 request_id=req.request_id,
@@ -161,6 +190,7 @@ class EngineCore:
                 max_new_tokens=req.max_new_tokens,
                 stop_ids=frozenset(req.stop_token_ids),
                 arrival=item.arrival,
+                written=written,
             ))
         else:
             release_pages(seq)
@@ -175,6 +205,13 @@ class EngineCore:
         outputs = []
         alive = []
         for slot, token in zip(self._running, tokens):
+            # The forward just wrote last_token into the page. The token sampled here is not stored yet.
+            slot.written.append(slot.last_token)
+            if len(slot.written) != slot.seq.seq_len:
+                raise RuntimeError(
+                    f"request {slot.request_id} has {len(slot.written)} stored tokens but cache length {slot.seq.seq_len}"
+                )
+            publish_written(self.pool.cache, slot.seq.blocks, slot.written)
             generated = slot.generated + 1
             reason = _finish_reason(token, generated, slot.max_new_tokens, slot.stop_ids)
             outputs.append(self._token(slot.request_id, token, reason, slot.arrival))
@@ -189,13 +226,14 @@ class EngineCore:
         self._running = alive
         return outputs
 
-    def _token(self, request_id, token, reason, arrival) -> StepOutput:
+    def _token(self, request_id, token, reason, arrival, cached_tokens=0) -> StepOutput:
         self._tokens += 1
         return StepOutput(
             request_id=request_id,
             token_id=token,
             finish_reason=reason,
             timestamps=OutputTimestamps(arrival=arrival, emitted=self.clock()),
+            cached_tokens=cached_tokens,
         )
 
     def _terminal(self, request_id, reason, arrival) -> StepOutput:
