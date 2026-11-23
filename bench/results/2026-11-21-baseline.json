@@ -4,7 +4,7 @@
   "date": "2026-11-21",
   "host": "WSL2",
   "command": "make bench-baseline",
-  "methodology": "Hugging Face AutoModelForCausalLM.generate on CUDA bf16, greedy, EOS disabled, compile disabled, default dynamic cache. Eager and sdpa are separate loads. Prompts are synthetic token ids, equal length within a batch, seed 0. Prefill is one forward of the prompt with use_cache, timed by CUDA events after the device is idle; tokens/s is batch * prompt_len / that time. Decode is generate of 32 new tokens. A stopping criterion synchronizes and stamps the host clock once per new token. That sync is the same device wait generate already performs on the next line, when it reads the unfinished-sequence flag; the stamp is not an extra stall. TTFT is the first stamp minus the start. Inter-token latency is the gap between later stamps, so it excludes the prompt. Decode tokens/s is batch / median inter-token latency, pooled over five repetitions after one discarded warmup. The ceiling uses the median copy bandwidth in bench/results/2026-10-31-m2-bandwidth.json and step_bytes at the prompt length, which is the context column in docs/profile-m2.md. During the 32 new tokens the live cache grows from prompt_len+1 to prompt_len+32; the weight term dominates that difference on these shapes. p99 is over the pooled gaps (31 per repetition, 155 total). Clocks are not locked. Host is WSL2. fp32 1.7B does not fit beside a CUDA context on this 8 GB card, so the baseline is bf16. Batch sizes past 8, and a prefill batch above 1, are left for the comparison that needs them.",
+  "methodology": "Hugging Face AutoModelForCausalLM.generate on CUDA bf16, greedy, EOS disabled, compile disabled, default dynamic cache. Eager and sdpa are separate loads. Prompts are synthetic token ids, equal length within a batch, seed 0. Prefill is one forward of the prompt with use_cache, timed by CUDA events after the device is idle; tokens/s is batch * prompt_len / that time. Decode is generate of 32 new tokens. A stopping criterion synchronizes and stamps the host clock once per new token. That sync is the same device wait generate already performs on the next line, when it reads the unfinished-sequence flag; the stamp is not an extra stall. TTFT is the first stamp minus the start. Inter-token latency is the gap between later stamps, so it excludes the prompt. Decode tokens/s is batch / median inter-token latency, pooled over five repetitions after one discarded warmup. The ceiling uses the median copy bandwidth in bench/results/2026-10-31-bandwidth.json and step_bytes at the prompt length, which is the context column in docs/decode-profile.md. During the 32 new tokens the live cache grows from prompt_len+1 to prompt_len+32; the weight term dominates that difference on these shapes. p99 is over the pooled gaps (31 per repetition, 155 total). Clocks are not locked. Host is WSL2. fp32 1.7B does not fit beside a CUDA context on this 8 GB card, so the baseline is bf16. Batch sizes past 8, and a prefill batch above 1, are left for the comparison that needs them.",
   "environment": {
     "host": "WSL2",
     "python": "3.14.4",
@@ -67,7 +67,7 @@
     "utilization.gpu": "53"
   },
   "bandwidth_bytes_per_s": 378672307987.7489,
-  "bandwidth_source": "bench/results/2026-10-31-m2-bandwidth.json",
+  "bandwidth_source": "bench/results/2026-10-31-bandwidth.json",
   "models": {
     "HuggingFaceTB/SmolLM2-135M": {
       "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
