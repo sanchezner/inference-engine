@@ -3,7 +3,7 @@ import torch
 from engine.config import ModelConfig
 import engine.kernels.triton.paged_attn as paged_attn
 from engine.kernels.triton.paged_attn import choose_splits, paged_attn_decode
-from engine.model import RopeTables, repeat_kv
+from engine.model import RopeTables, attention_cached, attention_prefill, repeat_kv
 import engine.paged as paged
 from engine.paged import PagePool, Sequence, forward_paged, forward_paged_batch, new_page_pool, new_sequence, page_gather
 from engine.weights import LayerWeights, Weights
@@ -33,6 +33,9 @@ def main():
     _strides_are_honored()
     _decode_forward_matches_gather()
     _split_decode_forward_matches_gather()
+    _prefill_attention_matches_mask()
+    _fresh_prefill_skips_the_score_matrix()
+    _prefix_prefill_still_gathers()
     _prefill_write_matches_page_write()
     _multitoken_batch_write_matches_page_write()
 
@@ -293,6 +296,72 @@ def _tiny_model(dtype, n_heads, n_kv, seed):
     embed = draw(cfg.vocab_size, hidden)
     weights = Weights(embed=embed, layers=layers, norm=torch.ones(hidden, device="cuda", dtype=dtype), lm_head=embed)
     return cfg, weights, RopeTables.build(cfg, "cuda")
+
+
+def _prefill_attention_matches_mask():
+    # fp32 measured max-abs 1.2e-7. bf16 is flash against the mask; measured 3.9e-3.
+    for dtype, n_kv, atol in (
+        (torch.float32, 2, _FP32_ATOL),
+        (torch.float32, 8, _FP32_ATOL),
+        (torch.bfloat16, 2, _BF16_ATOL),
+    ):
+        cfg, weights, rope = _tiny_model(dtype, n_heads=8, n_kv=n_kv, seed=7)
+        x = torch.randn(2, 9, cfg.hidden_size, device="cuda", dtype=dtype, generator=_gen(7))
+        cos, sin = rope.gather(torch.arange(9, device="cuda").unsqueeze(0))
+        got, gk, gv = attention_prefill(x, weights.layers[0], cfg, cos, sin)
+        ref, rk, rv = attention_cached(x, weights.layers[0], cfg, cos, sin, None, None)
+        assert torch.equal(gk, rk) and torch.equal(gv, rv)
+        _close(got, ref, atol, f"prefill attn {dtype} kv {n_kv}")
+
+
+def _fresh_prefill_skips_the_score_matrix():
+    cfg, weights, rope = _tiny_model(torch.float32, n_heads=8, n_kv=2, seed=8)
+    pool = new_page_pool(cfg, n_pages=16, block_size=4, device="cuda", dtype=torch.float32)
+    seq = new_sequence(pool)
+    ids = torch.randint(0, cfg.vocab_size, (1, 9), device="cuda", generator=_gen(8))
+    _assert_no_gather_or_mask(lambda: forward_paged(weights, cfg, rope, ids, seq))
+    others = [new_sequence(pool) for _ in range(2)]
+    batch_ids = torch.randint(0, cfg.vocab_size, (2, 5), device="cuda", generator=_gen(9))
+    _assert_no_gather_or_mask(lambda: forward_paged_batch(weights, cfg, rope, batch_ids, others))
+
+
+def _prefix_prefill_still_gathers():
+    # Three new tokens on top of two cached ones. SDPA on the new span would drop the prefix.
+    cfg, weights, rope = _tiny_model(torch.float32, n_heads=8, n_kv=2, seed=10)
+    pool = new_page_pool(cfg, n_pages=16, block_size=4, device="cuda", dtype=torch.float32)
+    seq = new_sequence(pool)
+    ids = torch.randint(0, cfg.vocab_size, (1, 5), device="cuda", generator=_gen(10))
+    forward_paged(weights, cfg, rope, ids[:, :2], seq)
+    assert seq.seq_len == 2
+    gathered = []
+    real = paged.page_gather
+
+    def mark(*args, **kwargs):
+        gathered.append(args[2] if len(args) > 2 else None)
+        return real(*args, **kwargs)
+
+    paged.page_gather = mark
+    try:
+        forward_paged(weights, cfg, rope, ids, seq)
+    finally:
+        paged.page_gather = real
+    assert gathered, "a prefix prefill never read the cached pages"
+
+
+def _assert_no_gather_or_mask(fn):
+    saved_gather = paged.page_gather
+    saved_mask = paged.attention_cached
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("fresh prefill gathered pages or built the score matrix")
+
+    paged.page_gather = boom
+    paged.attention_cached = boom
+    try:
+        return fn()
+    finally:
+        paged.page_gather = saved_gather
+        paged.attention_cached = saved_mask
 
 
 def _prefill_write_matches_page_write():

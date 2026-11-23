@@ -5,14 +5,14 @@ import torch
 from engine.config import ModelConfig
 from engine.kernels.triton.paged_attn import decode_supported, paged_attn_decode
 from engine.kernels.triton.reshape_cache import cache_supported, reshape_and_cache
-from engine.model import attention_cached, merge_heads, mlp, project_qkv, rms_norm
+from engine.model import attention_cached, attention_prefill, merge_heads, mlp, project_qkv, rms_norm
 from engine.weights import Weights
 
 
 # KV lives in pages so a finished sequence can return storage without moving
 # anyone else. k and v are [layer, page, kv_head, slot, dim].
-# CUDA writes the new K/V with one scatter, then a one-token step reads the pages.
-# Prefill attention and CPU still copy pages into a dense tensor (page_gather).
+# CUDA writes the new K/V with one scatter. One new token reads the pages.
+# A prefill with no prefix uses SDPA. A prefix still copies pages (page_gather).
 @dataclass
 class PagePool:
     k: torch.Tensor
@@ -119,6 +119,8 @@ def forward_paged(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, s
     cos, sin = rope.gather(pos)
     if _use_decode_kernel(weights, cfg, seq.pool, T_new):
         x = _decode_layers(weights, cfg, x, [seq], [past], cos, sin)
+    elif past == 0:
+        x = _prefill_layers(weights, cfg, x, [seq], cos, sin)
     else:
         x = _gather_one(weights, cfg, x, seq, past, T_new, cos, sin)
     return _logits(weights, cfg, x), seq
@@ -140,7 +142,7 @@ def gather_padded(seqs: list[Sequence], layer: int, lens: list[int], width: int)
 
 def forward_paged_batch(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seqs: list[Sequence]):
     # One new token on CUDA reads each sequence's own length.
-    # More than one new token still left-pads so one dense mask can run.
+    # A fresh batch uses SDPA. A batch that already has pages still left-pads.
     if ids.ndim != 2:
         raise ValueError(f"ids must have shape [batch, time], got {tuple(ids.shape)}")
     if len(seqs) != ids.shape[0]:
@@ -158,13 +160,15 @@ def forward_paged_batch(weights: Weights, cfg: ModelConfig, rope, ids: torch.Ten
     cos, sin = rope.gather(pos)
     if _use_decode_kernel(weights, cfg, seqs[0].pool, T_new):
         x = _decode_layers(weights, cfg, x, seqs, lens, cos, sin)
+    elif all(n == 0 for n in lens):
+        x = _prefill_layers(weights, cfg, x, seqs, cos, sin)
     else:
         x = _gather_batch(weights, cfg, x, seqs, lens, T_new, cos, sin)
     return _logits(weights, cfg, x), seqs
 
 
 def _use_decode_kernel(weights: Weights, cfg: ModelConfig, pool: PagePool, t_new: int) -> bool:
-    # One query per sequence. Prefill has many queries and stays on the dense mask.
+    # One query per sequence. A longer span is prefill and does not use this kernel.
     return t_new == 1 and decode_supported(weights.embed.device, weights.embed.dtype, cfg.head_dim, pool.block_size)
 
 
@@ -195,6 +199,31 @@ def _decode_layers(weights, cfg, x, seqs, lens, cos, sin):
         x = x + mlp(h, layer)
     for seq, n in zip(seqs, lens):
         seq.seq_len = n + 1
+    return x
+
+
+def _prefill_layers(weights, cfg, x, seqs, cos, sin):
+    # The new K and V are one contiguous span per row. SDPA on that span cannot see a prefix.
+    pool = seqs[0].pool
+    for seq in seqs[1:]:
+        if seq.pool is not pool:
+            raise ValueError("a prefill batch must share one page pool")
+    t_new = x.shape[1]
+    for seq in seqs:
+        if seq.seq_len != 0:
+            raise ValueError("a prefix has to be gathered; SDPA prefill only sees the new tokens")
+        reserve_pages(seq, t_new)
+    starts = [0] * len(seqs)
+    slots = _slots_for(pool, _block_tables(seqs, x.device), starts, t_new)
+    for i, layer in enumerate(weights.layers):
+        h = rms_norm(x, layer.input_norm, cfg.rms_norm_eps)
+        delta, k_new, v_new = attention_prefill(h, layer, cfg, cos, sin)
+        _write_new(seqs, i, k_new, v_new, starts, slots)
+        x = x + delta
+        h = rms_norm(x, layer.post_norm, cfg.rms_norm_eps)
+        x = x + mlp(h, layer)
+    for seq in seqs:
+        seq.seq_len = t_new
     return x
 
 

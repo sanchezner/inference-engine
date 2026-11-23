@@ -90,10 +90,18 @@ def repeat_kv(x, n_rep):
 
 
 def attention(x, layer: LayerWeights, cfg: ModelConfig, cos, sin):
-    # Prefill is the cached op with an empty cache. One mask, so a prefill and
-    # the first paged step cannot drift apart by construction.
-    delta, _, _ = attention_cached(x, layer, cfg, cos, sin, None, None)
+    # The uncached forward and a paged prefill with an empty cache share this.
+    delta, _, _ = attention_prefill(x, layer, cfg, cos, sin)
     return delta
+
+
+def attention_prefill(x, layer: LayerWeights, cfg: ModelConfig, cos, sin):
+    # No prefix, so each query's keys are exactly its own span. The causal mask stays inside SDPA.
+    q, k, v = project_qkv(x, layer, cfg, cos, sin)
+    attn = torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, is_causal=True, enable_gqa=cfg.n_heads != cfg.n_kv_heads,
+    )
+    return merge_heads(attn, layer), k, v
 
 
 def project_qkv(x, layer: LayerWeights, cfg: ModelConfig, cos, sin):
