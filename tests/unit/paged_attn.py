@@ -1,7 +1,8 @@
 import torch
 
 from engine.config import ModelConfig
-from engine.kernels.triton.paged_attn import paged_attn_decode
+import engine.kernels.triton.paged_attn as paged_attn
+from engine.kernels.triton.paged_attn import choose_splits, paged_attn_decode
 from engine.model import RopeTables, repeat_kv
 import engine.paged as paged
 from engine.paged import PagePool, Sequence, forward_paged, forward_paged_batch, new_page_pool, new_sequence, page_gather
@@ -26,9 +27,12 @@ def main():
     _one_token_is_the_value()
     _out_of_order_blocks_match_gather()
     _sweep()
+    _split_policy()
+    _splits_match_reference()
     _batch_matches_each_row_alone()
     _strides_are_honored()
     _decode_forward_matches_gather()
+    _split_decode_forward_matches_gather()
     _prefill_write_matches_page_write()
     _multitoken_batch_write_matches_page_write()
 
@@ -44,6 +48,8 @@ def _rejects_bad_arguments():
     _raises(lambda: paged_attn_decode(q, k, v, bt.to(torch.int64), sl), "int32")
     _raises(lambda: paged_attn_decode(q, k, v, bt, torch.zeros_like(sl)), "seq_len")
     _raises(lambda: paged_attn_decode(q, k, v, bt[:, :1], torch.tensor([20, 20], device="cuda", dtype=torch.int32)), "fit")
+    for bad in (0, -1, 1.5, True):
+        _raises(lambda: paged_attn_decode(q, k, v, bt, sl, num_splits=bad), "num_splits")
 
 
 def _empty_batch_is_empty():
@@ -118,14 +124,45 @@ def _sweep():
         )
 
 
+def _split_policy():
+    # 46 SMs is the 3070. Batch 4 of the 1.7B is 128 programs, already two waves.
+    assert choose_splits(batch=4, n_heads=32, max_tokens=4096, n_sm=46) == 1
+    assert choose_splits(batch=1, n_heads=32, max_tokens=64, n_sm=46) == 1
+    assert choose_splits(batch=1, n_heads=32, max_tokens=512, n_sm=46) == 4
+    assert choose_splits(batch=1, n_heads=32, max_tokens=2048, n_sm=46) == 6
+    assert choose_splits(batch=1, n_heads=9, max_tokens=2048, n_sm=46) == 16
+    for batch in (1, 2, 3, 8):
+        for n_heads in (1, 9, 32):
+            for max_tokens in (1, 127, 128, 1000, 100_000):
+                got = choose_splits(batch, n_heads, max_tokens, 46)
+                assert got >= 1
+                assert got == 1 or got * paged_attn._MIN_SPLIT_TOKENS <= max_tokens
+
+
+def _splits_match_reference():
+    # Lengths 1 and 5 end before most splits start, so those splits are empty and must weigh zero.
+    for dtype in (torch.float32, torch.bfloat16):
+        for block_size in (4, 16, 32):
+            for splits in (1, 2, 3, 7, 1000):
+                _compare(
+                    n_heads=8, n_kv=2, head_dim=64, block_size=block_size,
+                    lengths=[1, 5, block_size * 3 + 1, 300], dtype=dtype, seed=200 + splits + block_size,
+                    num_splits=splits,
+                )
+        _compare(n_heads=9, n_kv=3, head_dim=64, block_size=16, lengths=[2048], dtype=dtype, seed=301, num_splits=16)
+        _compare(n_heads=4, n_kv=4, head_dim=128, block_size=8, lengths=[4097, 9], dtype=dtype, seed=302, num_splits=5)
+
+
 def _batch_matches_each_row_alone():
+    # Exact only at a fixed split count. The automatic count follows the batch, so the summation order can change.
     q, k, v, bt, sl = _layout(
         n_heads=8, n_kv=2, head_dim=64, block_size=16, lengths=[1, 17, 64, 200], dtype=torch.float32, seed=7,
     )
-    batched = paged_attn_decode(q, k, v, bt, sl)
-    for b in range(q.shape[0]):
-        alone = paged_attn_decode(q[b:b + 1], k, v, bt[b:b + 1], sl[b:b + 1])
-        assert torch.equal(alone, batched[b:b + 1])
+    for splits in (1, 4):
+        batched = paged_attn_decode(q, k, v, bt, sl, num_splits=splits)
+        for b in range(q.shape[0]):
+            alone = paged_attn_decode(q[b:b + 1], k, v, bt[b:b + 1], sl[b:b + 1], num_splits=splits)
+            assert torch.equal(alone, batched[b:b + 1]), splits
 
 
 def _strides_are_honored():
@@ -171,6 +208,47 @@ def _decode_forward_matches_gather():
         _same_pages(pool.v[0], written[1][0], 0.0, f"v0 {dtype}")
         _same_pages(pool.k, written[0], atol, f"k {dtype}")
         _same_pages(pool.v, written[1], atol, f"v {dtype}")
+
+
+def _split_decode_forward_matches_gather():
+    # A 4-token split floor makes the tiny model's short rows take the split path inside the forward.
+    for dtype, atol in ((torch.float32, _FP32_ATOL), (torch.bfloat16, _BF16_ATOL)):
+        cfg, weights, rope = _tiny_model(dtype, n_heads=8, n_kv=2, seed=13)
+        pool = new_page_pool(cfg, n_pages=24, block_size=4, device="cuda", dtype=dtype)
+        seqs = []
+        for n, seed in zip((2, 11, 30), (4, 5, 6)):
+            seq = new_sequence(pool)
+            ids = torch.randint(0, cfg.vocab_size, (1, n), device="cuda", generator=_gen(seed))
+            _forcing_gather(lambda: forward_paged(weights, cfg, rope, ids, seq))
+            seqs.append(seq)
+        pool.k[:, 23] = float("nan")
+        pool.v[:, 23] = float("nan")
+        snap = _snap(seqs)
+        new_ids = torch.randint(0, cfg.vocab_size, (3, 1), device="cuda", generator=_gen(10))
+        saved = paged_attn._MIN_SPLIT_TOKENS
+        launched = []
+        saved_merge = paged_attn._merge_splits
+        paged_attn._MIN_SPLIT_TOKENS = 4
+        paged_attn._merge_splits = _Spy(saved_merge, launched)
+        try:
+            got, _ = _assert_decode_does_not_gather(lambda: forward_paged_batch(weights, cfg, rope, new_ids, seqs))
+        finally:
+            paged_attn._MIN_SPLIT_TOKENS = saved
+            paged_attn._merge_splits = saved_merge
+        assert len(launched) == cfg.n_layers, launched
+        _restore(seqs, snap)
+        ref, _ = _forcing_gather(lambda: forward_paged_batch(weights, cfg, rope, new_ids, seqs))
+        _close(got, ref, atol, f"split batch decode {dtype}")
+
+
+class _Spy:
+    def __init__(self, kernel, calls):
+        self.kernel = kernel
+        self.calls = calls
+
+    def __getitem__(self, grid):
+        self.calls.append(grid)
+        return self.kernel[grid]
 
 
 def _tiny_model(dtype, n_heads, n_kv, seed):
@@ -345,12 +423,12 @@ def _gen(seed):
     return g
 
 
-def _compare(n_heads, n_kv, head_dim, block_size, lengths, dtype, seed):
+def _compare(n_heads, n_kv, head_dim, block_size, lengths, dtype, seed, num_splits=None):
     q, k, v, bt, sl = _layout(n_heads, n_kv, head_dim, block_size, lengths, dtype, seed)
-    got = paged_attn_decode(q, k, v, bt, sl)
+    got = paged_attn_decode(q, k, v, bt, sl, num_splits=num_splits)
     ref, sdpa = _oracles(q, k, v, bt, sl)
     atol = _FP32_ATOL if dtype == torch.float32 else _BF16_ATOL
-    name = f"{dtype} block {block_size} heads {n_heads}/{n_kv} lens {lengths}"
+    name = f"{dtype} block {block_size} heads {n_heads}/{n_kv} lens {lengths} splits {num_splits}"
     _close(got, ref, atol, name)
     _close(sdpa, ref, _ORACLE_ATOL, f"sdpa {name}")
     return got, ref, sdpa, bt, v
