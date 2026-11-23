@@ -6,6 +6,7 @@ export TQDM_DISABLE := 1
 .PHONY: check bringup bench-bandwidth bench-profile bench-baseline
 
 check:
+	$(PY) tests/unit/paged_attn.py
 	$(PY) tests/sched/engine_core.py
 	$(PY) tests/sched/trace.py
 	$(PY) checks/trace.py

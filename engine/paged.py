@@ -9,8 +9,8 @@ from engine.weights import Weights
 
 # KV lives in pages so a finished sequence can return storage without moving
 # anyone else. k and v are [layer, page, kv_head, slot, dim]. Reading them
-# still copies a sequence's pages into a dense tensor (page_gather); the
-# kernel that reads the block table directly is M3, not this file.
+# still copies a sequence's pages into a dense tensor (page_gather).
+# paged_attn_decode reads the block table; this forward does not call it yet.
 @dataclass
 class PagePool:
     k: torch.Tensor
