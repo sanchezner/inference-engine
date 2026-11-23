@@ -42,7 +42,7 @@ def main():
         "timings_s": timings,
         "command": "PYTHONPATH=. .venv/bin/python bench/cpu_baseline.py",
     }
-    out = Path(__file__).resolve().parents[1] / "bench" / "results" / "2026-10-20-m0-cpu.json"
+    out = Path(__file__).resolve().parents[1] / "bench" / "results" / "2026-10-20-cpu.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)

@@ -4,7 +4,17 @@ from pathlib import Path
 
 import torch
 
-from bench.e2e.trace import TraceRequest, percentile, poisson_trace, read_trace, replay, summarize, write_trace
+from bench.e2e.trace import (
+    TraceRequest,
+    percentile,
+    poisson_trace,
+    read_trace,
+    replay,
+    shared_prefix_trace,
+    summarize,
+    write_trace,
+)
+from engine.kv.prefix_cache import attach_prefix_cache
 from engine.paged import PagePool, reserve_pages
 from engine.sched.engine_core import EngineCore
 from engine.sched.request import OutputTimestamps, StepOutput
@@ -16,6 +26,8 @@ def main():
     _percentile_is_nearest_rank()
     _summary_counts_tokens_and_gaps()
     _poisson_trace_is_seeded_and_fixed_length()
+    _shared_prefix_trace_is_one_head_and_many_tails()
+    _a_shared_burst_hits_only_when_the_cache_is_on()
     _trace_file_roundtrip_and_rejects()
     _instant_engine_finishes_one_before_the_next()
     _a_slow_step_admits_the_next_arrival()
@@ -62,6 +74,61 @@ def _poisson_trace_is_seeded_and_fixed_length():
         assert "rate" in str(exc)
     else:
         raise AssertionError("a zero arrival rate was accepted")
+
+
+def _shared_prefix_trace_is_one_head_and_many_tails():
+    rows = shared_prefix_trace(4, prefix_len=8, suffix_len=4, max_tokens=2, seed=1, vocab=50)
+    assert shared_prefix_trace(4, prefix_len=8, suffix_len=4, max_tokens=2, seed=1, vocab=50) == rows
+    assert shared_prefix_trace(4, prefix_len=8, suffix_len=4, max_tokens=2, seed=2, vocab=50) != rows
+    assert all(item.t == 0.0 and item.max_tokens == 2 for item in rows)
+    head = rows[0].prompt[:8]
+    tails = [item.prompt[8:] for item in rows]
+    assert all(item.prompt[:8] == head and len(item.prompt) == 12 for item in rows)
+    assert len(set(tails)) == 4
+    assert [tail[0] for tail in tails] == [0, 1, 2, 3]
+    spaced = shared_prefix_trace(3, prefix_len=4, suffix_len=2, max_tokens=1, seed=1, rate=5)
+    assert spaced[0].t == 0.0 and spaced[2].t > spaced[1].t > 0.0
+    assert all(item.prompt[:4] == spaced[0].prompt[:4] for item in spaced)
+    try:
+        shared_prefix_trace(1, prefix_len=0, suffix_len=1, max_tokens=1, seed=0)
+    except ValueError as exc:
+        assert "prefix_len" in str(exc)
+    else:
+        raise AssertionError("a zero-length shared prefix was accepted")
+
+
+def _a_shared_burst_hits_only_when_the_cache_is_on():
+    trace = shared_prefix_trace(2, prefix_len=8, suffix_len=4, max_tokens=2, seed=0, vocab=VOCAB)
+    cold_summary, cold, cold_stats = _replay_shared(trace, cache=False)
+    warm_summary, warm, warm_stats = _replay_shared(trace, cache=True)
+    assert cold_stats.counters.prefix_cache_hit_tokens == 0
+    assert cold_stats.counters.prefix_cache_query_tokens == 0
+    assert all(out.cached_tokens == 0 for outs in cold.values() for out in outs)
+    assert warm["0"][0].cached_tokens == 0
+    assert warm["1"][0].cached_tokens == 8
+    assert all(out.cached_tokens == 0 for out in warm["1"][1:])
+    assert warm_stats.counters.prefix_cache_hit_tokens == 8
+    assert warm_stats.counters.prefix_cache_query_tokens == 24
+    assert _tokens(cold) == _tokens(warm)
+    assert cold_summary["finished"] == 2 and warm_summary["finished"] == 2
+    assert cold_stats.blocks_free == cold_stats.blocks_total
+    assert warm_stats.blocks_free == warm_stats.blocks_total
+
+
+def _replay_shared(trace, cache):
+    pool = _pool(8, 4)
+    if cache:
+        attach_prefix_cache(pool, "m")
+    engine = EngineCore(_forward_one, _forward_batch, pool, max_batch=2)
+    summary, by_request = replay(engine, trace)
+    return summary, by_request, engine.stats()
+
+
+def _tokens(by_request):
+    return {
+        rid: [out.token_id for out in outs if out.token_id is not None]
+        for rid, outs in by_request.items()
+    }
 
 
 def _trace_file_roundtrip_and_rejects():

@@ -31,7 +31,7 @@ import engine.paged as paged
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BANDWIDTH_PATH = ROOT / "bench" / "results" / "2026-10-31-m2-bandwidth.json"
+BANDWIDTH_PATH = ROOT / "bench" / "results" / "2026-10-31-bandwidth.json"
 # Head counts from checks/roofline.py. The kernel does not need the weights.
 GEOMETRIES = (
     {"name": "135M", "n_heads": 9, "n_kv_heads": 3, "head_dim": 64},
@@ -67,7 +67,7 @@ STEP_WARMUP = 5
 STEP_TIMING = 10
 
 METHODOLOGY = (
-    "Two clocks. The kernel clock is a CUDA graph of 16 paged_attn_decode calls back to back, so a short kernel is not waiting on the host to submit the next replay; the reported time is per call. The calls rotate across copies of the K/V pool until the copies total at least four times the L2 cache (4 MiB on the 3070), so a small pool is read from DRAM and not from L2. With split-KV the call is two launches (the split pass and the merge) plus the fp32 partials; both are inside the graph and inside the time. Split counts come from choose_splits on the table width; when it picks more than one, the same buffers are also timed at num_splits=1 under 'unsplit', with the windows of the two alternating. Bytes are q read plus the output written plus K and V read, for the live tokens only, one layer. The partials are not counted as bytes, so split-KV pays for them in time. GQA does not multiply the KV bytes by the group size. Contexts and the ragged lengths are multiples of the block size, so the last page is full and the mask does not drop slots. Block tables are a seeded shuffle of the pages, which is the paged case; one sequential table is timed at the same bytes to show the shuffle. Five windows, each aimed at 40 ms; the reported time is the median window. The fraction is that GB/s over the median device-to-device copy in bench/results/2026-10-31-m2-bandwidth.json (378.7 GB/s, read plus write, decimal 1e9). The step clock is forward_paged_batch on CUDA bf16, block size 16, the same quantity as bench/profile.py: CUDA events around the forward, then argmax and a per-sequence .item(), after a sync so the card is idle at the start. Three modes per case (kernel, unsplit, gather): five warmup steps each, then ten timed rounds that rotate through the modes one step at a time, so background load lands on every column alike; seq_len is rewound so every step sees the same context and overwrites the same KV slot. The gather path is the same forward with the decode kernel switched off, so attention gathers pages and the cache write stays the scatter kernel. The unsplit step is the kernel path with choose_splits forced to 1. Tokens/s is batch / median wall seconds. The ceiling uses that same copy bandwidth and decode_step_bytes at the longest row, which is how the M2 table was computed. Host is WSL2. Clocks are not locked."
+    "Two clocks. The kernel clock is a CUDA graph of 16 paged_attn_decode calls back to back, so a short kernel is not waiting on the host to submit the next replay; the reported time is per call. The calls rotate across copies of the K/V pool until the copies total at least four times the L2 cache (4 MiB on the 3070), so a small pool is read from DRAM and not from L2. With split-KV the call is two launches (the split pass and the merge) plus the fp32 partials; both are inside the graph and inside the time. Split counts come from choose_splits on the table width; when it picks more than one, the same buffers are also timed at num_splits=1 under 'unsplit', with the windows of the two alternating. Bytes are q read plus the output written plus K and V read, for the live tokens only, one layer. The partials are not counted as bytes, so split-KV pays for them in time. GQA does not multiply the KV bytes by the group size. Contexts and the ragged lengths are multiples of the block size, so the last page is full and the mask does not drop slots. Block tables are a seeded shuffle of the pages, which is the paged case; one sequential table is timed at the same bytes to show the shuffle. Five windows, each aimed at 40 ms; the reported time is the median window. The fraction is that GB/s over the median device-to-device copy in bench/results/2026-10-31-bandwidth.json (378.7 GB/s, read plus write, decimal 1e9). The step clock is forward_paged_batch on CUDA bf16, block size 16, the same quantity as bench/profile.py: CUDA events around the forward, then argmax and a per-sequence .item(), after a sync so the card is idle at the start. Three modes per case (kernel, unsplit, gather): five warmup steps each, then ten timed rounds that rotate through the modes one step at a time, so background load lands on every column alike; seq_len is rewound so every step sees the same context and overwrites the same KV slot. The gather path is the same forward with the decode kernel switched off, so attention gathers pages and the cache write stays the scatter kernel. The unsplit step is the kernel path with choose_splits forced to 1. Tokens/s is batch / median wall seconds. The ceiling uses that same copy bandwidth and decode_step_bytes at the longest row, which is how the M2 table was computed. Host is WSL2. Clocks are not locked."
 )
 
 
@@ -470,7 +470,7 @@ def main():
         "host": "WSL2",
         "command": "make bench-paged",
         "methodology": METHODOLOGY,
-        "bandwidth_source": "bench/results/2026-10-31-m2-bandwidth.json",
+        "bandwidth_source": "bench/results/2026-10-31-bandwidth.json",
         "bandwidth_median_bytes_per_s": bandwidth,
         "environment": before,
         "nvidia_smi_under_load": clocks["under_load"],
@@ -480,7 +480,7 @@ def main():
         "ragged": ragged_rows,
         "steps": steps,
     }
-    out = ROOT / "bench" / "results" / f"{report['date']}-m3-paged.json"
+    out = ROOT / "bench" / "results" / f"{report['date']}-paged.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)

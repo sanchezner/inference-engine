@@ -343,7 +343,7 @@ def _profile_kernels(weights, cfg, rope, seqs, lengths) -> dict:
                 _rewind(seqs, lengths)
     finally:
         probe.mark = False
-    path = Path("/tmp/m2-profile-trace.json")
+    path = Path("/tmp/decode-profile-trace.json")
     prof.export_chrome_trace(str(path))
     try:
         data = json.loads(path.read_text())
@@ -465,7 +465,7 @@ def main():
         "nvidia_smi_after": nvidia_smi(),
         "models": models,
     }
-    out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-m2-profile.json"
+    out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-profile.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)

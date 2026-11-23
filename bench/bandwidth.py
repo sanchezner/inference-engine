@@ -160,7 +160,7 @@ def main():
             "models": {repo: model_report(repo, measured["median_bytes_per_s"]) for repo in MODELS},
         },
     }
-    out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-m2-bandwidth.json"
+    out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-bandwidth.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)

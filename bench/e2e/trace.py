@@ -46,6 +46,34 @@ def poisson_trace(n, rate, prompt_len, max_tokens, seed, vocab=1024):
     return rows
 
 
+def shared_prefix_trace(n, prefix_len, suffix_len, max_tokens, seed, vocab=1024, rate=None):
+    # A burst (rate is None) piles every arrival at t=0. A positive rate spaces them.
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError(f"n must be an int >= 1, got {n!r}")
+    if isinstance(prefix_len, bool) or not isinstance(prefix_len, int) or prefix_len < 1:
+        raise ValueError(f"prefix_len must be an int >= 1, got {prefix_len!r}")
+    if isinstance(suffix_len, bool) or not isinstance(suffix_len, int) or suffix_len < 1:
+        raise ValueError(f"suffix_len must be an int >= 1, got {suffix_len!r}")
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise ValueError(f"max_tokens must be an int >= 1, got {max_tokens!r}")
+    if isinstance(vocab, bool) or not isinstance(vocab, int) or vocab < 1:
+        raise ValueError(f"vocab must be an int >= 1, got {vocab!r}")
+    if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate <= 0):
+        raise ValueError(f"rate must be a positive number of requests per second, got {rate!r}")
+    rng = random.Random(seed)
+    prefix = tuple(rng.randrange(vocab) for _ in range(prefix_len))
+    rows = []
+    t = 0.0
+    for i in range(n):
+        if i and rate is not None:
+            t += rng.expovariate(rate)
+        tail = [rng.randrange(vocab) for _ in range(suffix_len)]
+        # Request index, so two tails cannot collide and share a block past the prefix.
+        tail[0] = i % vocab
+        rows.append(TraceRequest(t, prefix + tuple(tail), max_tokens, str(i)))
+    return rows
+
+
 def write_trace(path, requests):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

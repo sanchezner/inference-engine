@@ -38,7 +38,7 @@ NEW_TOKENS = 32
 WARMUP = 1
 REPS = 5
 DTYPE = torch.bfloat16
-BANDWIDTH_RESULT = Path(__file__).resolve().parent / "results" / "2026-10-31-m2-bandwidth.json"
+BANDWIDTH_RESULT = Path(__file__).resolve().parent / "results" / "2026-10-31-bandwidth.json"
 
 METHODOLOGY = (
     "Hugging Face AutoModelForCausalLM.generate on CUDA bf16, greedy, EOS disabled, compile disabled, default dynamic cache. "
@@ -48,7 +48,7 @@ METHODOLOGY = (
     "That sync is the same device wait generate already performs on the next line, when it reads the unfinished-sequence flag; the stamp is not an extra stall. "
     "TTFT is the first stamp minus the start. Inter-token latency is the gap between later stamps, so it excludes the prompt. "
     "Decode tokens/s is batch / median inter-token latency, pooled over five repetitions after one discarded warmup. "
-    "The ceiling uses the median copy bandwidth in bench/results/2026-10-31-m2-bandwidth.json and step_bytes at the prompt length, which is the context column in docs/profile-m2.md. "
+    "The ceiling uses the median copy bandwidth in bench/results/2026-10-31-bandwidth.json and step_bytes at the prompt length, which is the context column in docs/decode-profile.md. "
     "During the 32 new tokens the live cache grows from prompt_len+1 to prompt_len+32; the weight term dominates that difference on these shapes. "
     "p99 is over the pooled gaps (31 per repetition, 155 total). Clocks are not locked. Host is WSL2. "
     "fp32 1.7B does not fit beside a CUDA context on this 8 GB card, so the baseline is bf16. "
@@ -346,7 +346,7 @@ def main():
         "bandwidth_source": str(BANDWIDTH_RESULT.relative_to(Path(__file__).resolve().parents[1])),
         "models": models,
     }
-    out = Path(__file__).resolve().parent / "results" / f"{report['date']}-m2-baseline.json"
+    out = Path(__file__).resolve().parent / "results" / f"{report['date']}-baseline.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)
