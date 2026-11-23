@@ -1,8 +1,11 @@
 import torch
 
+from engine.config import ModelConfig
 from engine.kernels.triton.paged_attn import paged_attn_decode
-from engine.model import repeat_kv
-from engine.paged import PagePool, Sequence, page_gather
+from engine.model import RopeTables, repeat_kv
+import engine.paged as paged
+from engine.paged import PagePool, Sequence, forward_paged, forward_paged_batch, new_page_pool, new_sequence, page_gather
+from engine.weights import LayerWeights, Weights
 
 # RTX 3070, WSL2, triton 3.8. Measured max-abs on the sweep below: fp32 4.8e-7, bf16 7.8e-3.
 # The bf16 gap is one ulp at magnitude 1, from rounding the fp32 accumulator on store.
@@ -25,6 +28,7 @@ def main():
     _sweep()
     _batch_matches_each_row_alone()
     _strides_are_honored()
+    _decode_forward_matches_gather()
 
 
 def _rejects_bad_arguments():
@@ -136,6 +140,133 @@ def _strides_are_honored():
     assert torch.equal(got, base)
 
 
+def _decode_forward_matches_gather():
+    # The kernel replaces the gather on a one-token CUDA step. Same weights, both ways.
+    for dtype, atol in ((torch.float32, _FP32_ATOL), (torch.bfloat16, _BF16_ATOL)):
+        cfg, weights, rope = _tiny_model(dtype, n_heads=8, n_kv=2, seed=3)
+        pool = new_page_pool(cfg, n_pages=16, block_size=4, device="cuda", dtype=dtype)
+        seqs = []
+        for n, seed in zip((1, 5, 8), (1, 2, 3)):
+            seq = new_sequence(pool)
+            ids = torch.randint(0, cfg.vocab_size, (1, n), device="cuda", generator=_gen(seed))
+            _forcing_gather(lambda: forward_paged(weights, cfg, rope, ids, seq))
+            seqs.append(seq)
+        # Page 15 is not in any table. An over-read comes back as NaN.
+        pool.k[:, 15] = float("nan")
+        pool.v[:, 15] = float("nan")
+        seqs[1].blocks = [seqs[1].blocks[1], seqs[1].blocks[0]]
+        snap = _snap(seqs)
+        new_ids = torch.randint(0, cfg.vocab_size, (3, 1), device="cuda", generator=_gen(9))
+        got, _ = _assert_decode_does_not_gather(lambda: forward_paged_batch(weights, cfg, rope, new_ids, seqs))
+        written = (pool.k.clone(), pool.v.clone(), [list(s.blocks) for s in seqs], [s.seq_len for s in seqs])
+        _restore(seqs, snap)
+        ref, _ = _forcing_gather(lambda: forward_paged_batch(weights, cfg, rope, new_ids, seqs))
+        _close(got, ref, atol, f"batch decode {dtype}")
+        assert [list(s.blocks) for s in seqs] == written[2]
+        assert [s.seq_len for s in seqs] == written[3]
+        # Layer 0's residual does not depend on attention, so that write matches exactly.
+        _same_pages(pool.k[0], written[0][0], 0.0, f"k0 {dtype}")
+        _same_pages(pool.v[0], written[1][0], 0.0, f"v0 {dtype}")
+        _same_pages(pool.k, written[0], atol, f"k {dtype}")
+        _same_pages(pool.v, written[1], atol, f"v {dtype}")
+
+
+def _tiny_model(dtype, n_heads, n_kv, seed):
+    g = _gen(seed)
+    head_dim = 64
+    hidden = n_heads * head_dim
+    intermediate = 128
+    cfg = ModelConfig(
+        n_layers=2,
+        n_heads=n_heads,
+        n_kv_heads=n_kv,
+        head_dim=head_dim,
+        hidden_size=hidden,
+        intermediate_size=intermediate,
+        rms_norm_eps=1e-5,
+        vocab_size=32,
+        max_position=64,
+        rope_theta=10_000.0,
+        rope_type="default",
+        tie_word_embeddings=True,
+        eos_token_ids=(0,),
+        bos_token_id=None,
+    )
+
+    def draw(*shape):
+        return torch.randn(*shape, device="cuda", dtype=dtype, generator=g) * 0.02
+
+    layers = tuple(
+        LayerWeights(
+            q=draw(n_heads * head_dim, hidden),
+            k=draw(n_kv * head_dim, hidden),
+            v=draw(n_kv * head_dim, hidden),
+            o=draw(hidden, n_heads * head_dim),
+            gate=draw(intermediate, hidden),
+            up=draw(intermediate, hidden),
+            down=draw(hidden, intermediate),
+            input_norm=torch.ones(hidden, device="cuda", dtype=dtype),
+            post_norm=torch.ones(hidden, device="cuda", dtype=dtype),
+        )
+        for _ in range(cfg.n_layers)
+    )
+    embed = draw(cfg.vocab_size, hidden)
+    weights = Weights(embed=embed, layers=layers, norm=torch.ones(hidden, device="cuda", dtype=dtype), lm_head=embed)
+    return cfg, weights, RopeTables.build(cfg, "cuda")
+
+
+def _assert_decode_does_not_gather(fn):
+    saved_gather = paged.page_gather
+    saved_padded = paged.gather_padded
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("decode step gathered pages")
+
+    paged.page_gather = boom
+    paged.gather_padded = boom
+    try:
+        return fn()
+    finally:
+        paged.page_gather = saved_gather
+        paged.gather_padded = saved_padded
+
+
+def _forcing_gather(fn):
+    saved = paged.decode_supported
+    paged.decode_supported = lambda *_args, **_kwargs: False
+    try:
+        return fn()
+    finally:
+        paged.decode_supported = saved
+
+
+def _snap(seqs):
+    pool = seqs[0].pool
+    return (
+        pool.k.clone(),
+        pool.v.clone(),
+        list(pool.free),
+        [(list(seq.blocks), seq.seq_len) for seq in seqs],
+    )
+
+
+def _restore(seqs, snap):
+    k, v, free, states = snap
+    pool = seqs[0].pool
+    pool.k.copy_(k)
+    pool.v.copy_(v)
+    pool.free[:] = free
+    for seq, (blocks, n) in zip(seqs, states):
+        seq.blocks[:] = blocks
+        seq.seq_len = n
+
+
+def _gen(seed):
+    g = torch.Generator(device="cuda")
+    g.manual_seed(seed)
+    return g
+
+
 def _compare(n_heads, n_kv, head_dim, block_size, lengths, dtype, seed):
     q, k, v, bt, sl = _layout(n_heads, n_kv, head_dim, block_size, lengths, dtype, seed)
     got = paged_attn_decode(q, k, v, bt, sl)
@@ -210,6 +341,16 @@ def _buffers(batch, n_heads, n_kv, head_dim, block_size, width):
     bt = torch.zeros(batch, width, device="cuda", dtype=torch.int32)
     sl = torch.ones(batch, device="cuda", dtype=torch.int32)
     return q, k, v, bt, sl
+
+
+def _same_pages(got, ref, atol, name):
+    nan_got = torch.isnan(got)
+    nan_ref = torch.isnan(ref)
+    assert torch.equal(nan_got, nan_ref), name
+    if bool(nan_got.all()):
+        return
+    err = (got[~nan_got].float() - ref[~nan_ref].float()).abs().max().item()
+    assert err <= atol, f"{name}: max abs err {err} > {atol}"
 
 
 def _close(got, ref, atol, name):

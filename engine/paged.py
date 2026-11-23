@@ -3,14 +3,15 @@ from dataclasses import dataclass, field
 import torch
 
 from engine.config import ModelConfig
-from engine.model import attention_cached, mlp, rms_norm
+from engine.kernels.triton.paged_attn import decode_supported, paged_attn_decode
+from engine.model import attention_cached, merge_heads, mlp, project_qkv, rms_norm
 from engine.weights import Weights
 
 
 # KV lives in pages so a finished sequence can return storage without moving
-# anyone else. k and v are [layer, page, kv_head, slot, dim]. Reading them
-# still copies a sequence's pages into a dense tensor (page_gather).
-# paged_attn_decode reads the block table; this forward does not call it yet.
+# anyone else. k and v are [layer, page, kv_head, slot, dim].
+# One new token on CUDA is written into its slot, then read from the block table.
+# Prefill and CPU still copy pages into a dense tensor (page_gather).
 @dataclass
 class PagePool:
     k: torch.Tensor
@@ -115,20 +116,11 @@ def forward_paged(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, s
     T_new = new_ids.shape[1]
     pos = torch.arange(past, past + T_new, device=device).unsqueeze(0)
     cos, sin = rope.gather(pos)
-    reserve_pages(seq, past + T_new)
-
-    for i, layer in enumerate(weights.layers):
-        h = rms_norm(x, layer.input_norm, cfg.rms_norm_eps)
-        past_k, past_v = (None, None) if past == 0 else page_gather(seq, i, past)
-        delta, k_new, v_new = attention_cached(h, layer, cfg, cos, sin, past_k, past_v)
-        page_write(seq, i, k_new, v_new, past)
-        x = x + delta
-        h = rms_norm(x, layer.post_norm, cfg.rms_norm_eps)
-        x = x + mlp(h, layer)
-
-    seq.seq_len = past + T_new
-    x = rms_norm(x, weights.norm, cfg.rms_norm_eps)
-    return x[:, -1] @ weights.lm_head.T, seq
+    if _use_decode_kernel(weights, cfg, seq.pool, T_new):
+        x = _decode_layers(weights, cfg, x, [seq], [past], cos, sin)
+    else:
+        x = _gather_one(weights, cfg, x, seq, past, T_new, cos, sin)
+    return _logits(weights, cfg, x), seq
 
 
 def gather_padded(seqs: list[Sequence], layer: int, lens: list[int], width: int):
@@ -146,44 +138,109 @@ def gather_padded(seqs: list[Sequence], layer: int, lens: list[int], width: int)
 
 
 def forward_paged_batch(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seqs: list[Sequence]):
-    # One new-token row per live sequence. Past keys are left-padded to the
-    # longest sequence so a single dense attention can run; M3 drops that pad.
+    # One new token on CUDA reads each sequence's own length.
+    # More than one new token still left-pads so one dense mask can run.
     if ids.ndim != 2:
         raise ValueError(f"ids must have shape [batch, time], got {tuple(ids.shape)}")
     if len(seqs) != ids.shape[0]:
         raise ValueError(f"{len(seqs)} sequences for a batch of {ids.shape[0]}")
+    if not seqs:
+        raise ValueError("paged batch forward needs at least one sequence")
     for seq in seqs:
         _same_device(weights, seq.pool)
     device = weights.embed.device
     ids = ids.to(device=device)
     lens = [seq.seq_len for seq in seqs]
-    width = max(lens)
     T_new = ids.shape[1]
-    pad_lens = torch.tensor([width - n for n in lens], device=device)
     x = weights.embed[ids]
     pos = torch.tensor(lens, device=device).unsqueeze(1) + torch.arange(T_new, device=device)
     cos, sin = rope.gather(pos)
+    if _use_decode_kernel(weights, cfg, seqs[0].pool, T_new):
+        x = _decode_layers(weights, cfg, x, seqs, lens, cos, sin)
+    else:
+        x = _gather_batch(weights, cfg, x, seqs, lens, T_new, cos, sin)
+    return _logits(weights, cfg, x), seqs
 
+
+def _use_decode_kernel(weights: Weights, cfg: ModelConfig, pool: PagePool, t_new: int) -> bool:
+    # One query per sequence. Prefill has many queries and stays on the dense mask.
+    return t_new == 1 and decode_supported(weights.embed.device, weights.embed.dtype, cfg.head_dim, pool.block_size)
+
+
+def _decode_layers(weights, cfg, x, seqs, lens, cos, sin):
+    # The kernel only reads the pool. The new token has to be stored before the launch.
+    pool = seqs[0].pool
+    for seq in seqs[1:]:
+        if seq.pool is not pool:
+            raise ValueError("a decode batch must share one page pool")
     for seq, n in zip(seqs, lens):
-        reserve_pages(seq, n + T_new)
+        reserve_pages(seq, n + 1)
+    lengths = [n + 1 for n in lens]
+    tables = _block_tables(seqs, x.device)
+    width = tables.shape[1]
+    for n in lengths:
+        if n < 1 or (n + pool.block_size - 1) // pool.block_size > width:
+            raise ValueError("each seq_len must be >= 1 and fit in block_tables")
+    seq_lens = torch.tensor(lengths, device=x.device, dtype=torch.int32)
+    for i, layer in enumerate(weights.layers):
+        h = rms_norm(x, layer.input_norm, cfg.rms_norm_eps)
+        q, k_new, v_new = project_qkv(h, layer, cfg, cos, sin)
+        for row, seq in enumerate(seqs):
+            page_write(seq, i, k_new[row:row + 1], v_new[row:row + 1], lens[row])
+        attn = paged_attn_decode(q[:, :, 0], pool.k[i], pool.v[i], tables, seq_lens, check=False)
+        x = x + merge_heads(attn.unsqueeze(2), layer)
+        h = rms_norm(x, layer.post_norm, cfg.rms_norm_eps)
+        x = x + mlp(h, layer)
+    for seq, n in zip(seqs, lens):
+        seq.seq_len = n + 1
+    return x
 
+
+def _gather_one(weights, cfg, x, seq, past, t_new, cos, sin):
+    reserve_pages(seq, past + t_new)
+    for i, layer in enumerate(weights.layers):
+        h = rms_norm(x, layer.input_norm, cfg.rms_norm_eps)
+        past_k, past_v = (None, None) if past == 0 else page_gather(seq, i, past)
+        delta, k_new, v_new = attention_cached(h, layer, cfg, cos, sin, past_k, past_v)
+        page_write(seq, i, k_new, v_new, past)
+        x = x + delta
+        h = rms_norm(x, layer.post_norm, cfg.rms_norm_eps)
+        x = x + mlp(h, layer)
+    seq.seq_len = past + t_new
+    return x
+
+
+def _gather_batch(weights, cfg, x, seqs, lens, t_new, cos, sin):
+    width = max(lens)
+    pad_lens = torch.tensor([width - n for n in lens], device=x.device)
+    for seq, n in zip(seqs, lens):
+        reserve_pages(seq, n + t_new)
     for i, layer in enumerate(weights.layers):
         h = rms_norm(x, layer.input_norm, cfg.rms_norm_eps)
         past_k, past_v = gather_padded(seqs, i, lens, width)
-        delta, k_new, v_new = attention_cached(
-            h, layer, cfg, cos, sin, past_k, past_v, pad_lens
-        )
+        delta, k_new, v_new = attention_cached(h, layer, cfg, cos, sin, past_k, past_v, pad_lens)
         for row, seq in enumerate(seqs):
             page_write(seq, i, k_new[row:row + 1], v_new[row:row + 1], lens[row])
         x = x + delta
         h = rms_norm(x, layer.post_norm, cfg.rms_norm_eps)
         x = x + mlp(h, layer)
-
     for seq, n in zip(seqs, lens):
-        seq.seq_len = n + T_new
+        seq.seq_len = n + t_new
+    return x
 
+
+def _block_tables(seqs, device):
+    width = max(len(seq.blocks) for seq in seqs)
+    table = torch.zeros(len(seqs), width, device=device, dtype=torch.int32)
+    for row, seq in enumerate(seqs):
+        if seq.blocks:
+            table[row, :len(seq.blocks)] = torch.tensor(seq.blocks, dtype=torch.int32, device=device)
+    return table
+
+
+def _logits(weights, cfg, x):
     x = rms_norm(x, weights.norm, cfg.rms_norm_eps)
-    return x[:, -1] @ weights.lm_head.T, seqs
+    return x[:, -1] @ weights.lm_head.T
 
 
 def _same_device(weights: Weights, pool: PagePool) -> None:

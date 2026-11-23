@@ -9,6 +9,15 @@ _BLOCK_SIZES = (4, 8, 16, 32)
 _HEAD_DIMS = (64, 128)
 
 
+def decode_supported(device, dtype, head_dim, block_size) -> bool:
+    return (
+        device.type == "cuda"
+        and dtype in (torch.float32, torch.bfloat16)
+        and head_dim in _HEAD_DIMS
+        and block_size in _BLOCK_SIZES
+    )
+
+
 @triton.jit
 def _paged_decode(
     q_ptr, k_ptr, v_ptr, o_ptr,
@@ -64,7 +73,7 @@ def _paged_decode(
     tl.store(o_ptr + pid_b * stride_ob + pid_h * stride_oh + offs_d * stride_od, acc / l_i)
 
 
-def paged_attn_decode(q, k_pool, v_pool, block_tables, seq_lens):
+def paged_attn_decode(q, k_pool, v_pool, block_tables, seq_lens, *, check=True):
     # One query per sequence. The new token's K and V are already in the pages.
     if q.ndim != 3:
         raise ValueError(f"q must have shape [batch, heads, dim], got {tuple(q.shape)}")
@@ -104,9 +113,11 @@ def paged_attn_decode(q, k_pool, v_pool, block_tables, seq_lens):
     if batch == 0:
         return q.new_empty(q.shape)
     # One sync. A short table would otherwise read off the end of block_tables.
-    fits = ((seq_lens + block_size - 1) // block_size) <= block_tables.shape[1]
-    if bool(((seq_lens < 1) | ~fits).any()):
-        raise ValueError("each seq_len must be >= 1 and fit in block_tables")
+    # check=False skips it. The forward already checked, and this runs once per layer.
+    if check:
+        fits = ((seq_lens + block_size - 1) // block_size) <= block_tables.shape[1]
+        if bool(((seq_lens < 1) | ~fits).any()):
+            raise ValueError("each seq_len must be >= 1 and fit in block_tables")
 
     out = torch.empty_like(q)
     _paged_decode[(batch, n_heads)](

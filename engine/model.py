@@ -96,34 +96,44 @@ def attention(x, layer: LayerWeights, cfg: ModelConfig, cos, sin):
     return delta
 
 
+def project_qkv(x, layer: LayerWeights, cfg: ModelConfig, cos, sin):
+    # One projection for the dense mask and the paged kernel, so RoPE cannot drift.
+    B, T, _ = x.shape
+    head_dim = cfg.head_dim
+    q = (x @ layer.q.T).view(B, T, cfg.n_heads, head_dim).transpose(1, 2)
+    k = (x @ layer.k.T).view(B, T, cfg.n_kv_heads, head_dim).transpose(1, 2)
+    v = (x @ layer.v.T).view(B, T, cfg.n_kv_heads, head_dim).transpose(1, 2)
+    q, k = apply_rope(q, k, cos, sin)
+    return q, k, v
+
+
+def merge_heads(attn, layer: LayerWeights):
+    B, n_heads, T, head_dim = attn.shape
+    merged = attn.transpose(1, 2).contiguous().view(B, T, n_heads * head_dim)
+    return merged @ layer.o.T
+
+
 def attention_cached(x, layer: LayerWeights, cfg: ModelConfig, cos, sin, past_k, past_v, pad_lens=None):
     # Returns the attention residual plus the new K/V only. The caller stores
     # those; concatenating them back into the next past is the caller's job.
     # A square triu mask is wrong here: the keys are longer than the queries
     # once a cache exists, and a left-padded batch has holes at the front.
     B, T, _ = x.shape
-    n_heads = cfg.n_heads
-    n_kv = cfg.n_kv_heads
-    head_dim = cfg.head_dim
-    q = (x @ layer.q.T).view(B, T, n_heads, head_dim).transpose(1, 2)
-    k = (x @ layer.k.T).view(B, T, n_kv, head_dim).transpose(1, 2)
-    v = (x @ layer.v.T).view(B, T, n_kv, head_dim).transpose(1, 2)
-    q, k = apply_rope(q, k, cos, sin)
+    q, k, v = project_qkv(x, layer, cfg, cos, sin)
     k_new, v_new = k, v
 
     if past_k is not None:
         k = torch.cat([past_k, k], dim=2)
         v = torch.cat([past_v, v], dim=2)
 
-    n_rep = n_heads // n_kv
+    n_rep = cfg.n_heads // cfg.n_kv_heads
     k = repeat_kv(k, n_rep)
     v = repeat_kv(v, n_rep)
     # Softmax accumulator is fp32 even when q and k are bf16.
-    scores = (q.float() @ k.float().transpose(-1, -2)) * (head_dim ** -0.5)
+    scores = (q.float() @ k.float().transpose(-1, -2)) * (cfg.head_dim ** -0.5)
     scores = scores.masked_fill(_causal_mask(T, k.shape[2], pad_lens, x.device), torch.finfo(torch.float32).min)
     attn = torch.softmax(scores, dim=-1).to(dtype=v.dtype)
-    merged = (attn @ v).transpose(1, 2).contiguous().view(B, T, n_heads * head_dim)
-    return merged @ layer.o.T, k_new, v_new
+    return merge_heads(attn @ v, layer), k_new, v_new
 
 
 def _causal_mask(query_len, key_len, pad_lens, device):
