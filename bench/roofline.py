@@ -47,6 +47,21 @@ def decode_step_bytes(cfg: ModelConfig, dtype_bytes: int, batch: int, context: i
     )
 
 
+def paged_decode_kernel_bytes(n_heads: int, n_kv_heads: int, head_dim: int, dtype_bytes: int, seq_lens) -> int:
+    # One launch, one layer. GQA reads each KV head once; the repeat never becomes bytes.
+    if n_heads < 1 or n_kv_heads < 1 or n_heads % n_kv_heads != 0:
+        raise ValueError(f"n_heads ({n_heads}) must be a positive multiple of n_kv_heads ({n_kv_heads})")
+    if head_dim < 1 or dtype_bytes < 1:
+        raise ValueError(f"head_dim and dtype_bytes must be positive, got {head_dim} and {dtype_bytes}")
+    live = 0
+    for n in seq_lens:
+        if n < 1:
+            raise ValueError(f"seq_len must be >= 1, got {n}")
+        live += n
+    vector = head_dim * dtype_bytes
+    return (2 * len(seq_lens) * n_heads + 2 * live * n_kv_heads) * vector
+
+
 def decode_ceiling_tokens_per_s(bandwidth_bytes_per_s: float, step_bytes: int, batch: int) -> float:
     if bandwidth_bytes_per_s <= 0:
         raise ValueError(f"bandwidth must be positive, got {bandwidth_bytes_per_s}")

@@ -3,6 +3,7 @@ from huggingface_hub import hf_hub_download
 from bench.roofline import (
     decode_step_bytes,
     kv_bytes_per_token,
+    paged_decode_kernel_bytes,
     parameter_elements,
     streamed_weight_elements,
 )
@@ -87,8 +88,16 @@ def _known(repo, shape, streamed, kv_bf16):
     )
 
 
+def _kernel_bytes():
+    # q and the output once per query head, K and V once per live token per KV head.
+    assert paged_decode_kernel_bytes(32, 32, 64, 2, (128,)) == (2 * 1 * 32 + 2 * 128 * 32) * 64 * 2
+    # 9 query heads share 3 KV heads. The byte count does not grow by the group of 3.
+    assert paged_decode_kernel_bytes(9, 3, 64, 2, (1, 5)) == (2 * 2 * 9 + 2 * 6 * 3) * 64 * 2
+
+
 def main():
     _synthetic()
+    _kernel_bytes()
     _known(SMALL, (30, 9, 3, 64, 576, 1536, 49152), 134_515_008, 23_040)
     _known(LARGE, (24, 32, 32, 64, 2048, 8192, 49152), 1_711_376_384, 196_608)
 
