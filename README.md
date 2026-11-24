@@ -1,42 +1,28 @@
 # inference engine
 
-## what this is
+This is a single-GPU inference engine for Llama-architecture models. It seats waiting requests when the page pool can hold the request's prompt and its token budget, and computes every admitted request's next token in one batched forward pass.
 
-A from-scratch inference runtime I'm building to get a deeper understanding of inference engines.
+The engine is a library, not a server. There are no threads or networking; a caller submits requests, calls `step()` to advance running requests by one token, and decides what to do with the tokens that return. Requests arrive as token ids, so the caller also handles tokenization.
 
-## log:
+Python (on the CPU) handles scheduling and memory bookkeeping, and the model math runs on the GPU in PyTorch and Triton. The two halves communicate through the page tables.
 
-**<ins>2026-11-22</ins> ~ A ticket window**
+For the sake of learning, every path is checked against Hugging Face as a reference and benchmarked against it on the same GPU.
 
-Vroom vroom. We have an engine now, and it can take a request, run a step, and cancel it, instead of getting the whole batch up front. A request can only be taken when the page pool can hold its prompt and every token it's allowed to generate; one that can't fit is rejected, and a line waiting longer than 256 is also rejected. A trace replayer submits on the clock and records time to first token as well as the gap between tokens. On SmolLM2-135M (yes, I know.. this is only to test exactness), twenty requests w/ five cancelled midway match offline greedy on the ones that actually finish, and the page pool is full again when the engine is idle.
+## Scope
 
-**<ins>2026-11-21</ins> ~ A model big enough to time**
+**Models**: Llama-architecture decoder-only models; the engine runs SmolLM2-135M and SmolLM2-1.7B. The 135M is small enough to check on CPU and the 1.7B is large enough to show how ~~bad~~ good my kernels are. It also uses full multi-head attention, so its KV cache is big per token.
 
-SmolLM2-1.7B is in `make check`, and baselines are recorded (will make sense later).
+**Hardware**: a single RTX 3070 (Ampere, 8GB) under WSL2, so bf16 tensor cores and no FP8 :(
 
-| 1.7B decode, bf16, context 128 | batch 1 | batch 8 |
-|---|---|---|
-| Hugging Face `generate` | 36 tok/s | 298 tok/s |
-| this engine | 17 tok/s | 66 tok/s |
+**Precision**: bf16 for serving, and fp32 wherever bf16 would round the answer (so attention softmax, RoPE, RMSNorm) and for matching HF token for token.
 
-The 135M model stopped being useful for timing as it gave the GPU too little work to measure, so I swapped it for the 1.7B, which runs on the same loader. fp32 doesn't fit on the 3070, so CUDA bf16 is scored against the CPU run over 400 positions w/ a mean KL 2.09e-3, top-1 98%; limits are in `tests/thresholds.toml`.
+**What's built**: model forward pass, paged KV cache and prefix cache, scheduler behind `EngineCore`, and two Triton kernels (decode attention that reads K and V directly from pages and a cache write that scatters new K and V into pages in one launch).
 
-**<ins>2026-10-24</ins> ~ Off the Hugging Face module**
+**"from scratch"**: you won't find a single `import transformers` in the engine, I promise. The config is parsed from `config.json` and weights load from safetensors. You may or may not find tensors and matmuls to come from PyTorch and cuBLAS... and that prefill attention uses PyTorch's dot product attention, but that's it... *for now*.
 
-The Llama runtime loads its own config and safetensors and no longer reads a Hugging Face module. The uncached forward and the page pool run on CPU fp32, CUDA fp32, and CUDA bf16 on the RTX 3070. fp32 greedy output matches Hugging Face, including the out-of-order block table `[4, 5, 1]`. bf16 is scored by KL and teacher-forced top-1, and the first measured limits are frozen in `tests/thresholds.toml`. Page state is a `PagePool` and a `Sequence`. The dense cache stays in `engine/legacy/` as the CPU ablation.
+## Non-goals
 
-**<ins>2026-10-20</ins> ~ Checks can fail + refactor**
-
-The printed comparisons are assertions now. `make check` runs the GPT-2 forward, the dense cache, static and continuous batching, and the page pool, and it fails if a logit drifts past the recorded tolerance or if a retired sequence doesn't return its pages. GPT-2 and the dense-cache batcher were moved to `engine/legacy/` and stay there as the ablation baseline.
-
-**<ins>2026-10-15</ins> ~ A pool of pages**
-
-Keys and values now live in a shared page pool instead of one dense rectangle per batch. One sequence matches the dense cached generate, two sequences share the pool, and a finished sequence returns its pages while the survivor keeps its block ids, including the out-of-order list `[4, 5, 1]`. The continuous batcher admits and retires on that pool without shifting anyone else’s pages.
-
-**<ins>2026-10-12</ins> ~ A cache, then a batch**
-
-The GPT-2 forward now sits in a greedy loop that rescores the whole sequence every token, matching Hugging Face for 10 tokens, and the same prompt runs on SmolLM2-135M with RMSNorm, RoPE, grouped-query attention, and a SwiGLU MLP. A KV cache scores only the new token. Four prompts share that forward, mixed lengths are left-padded, and a continuous batch drops a finished row and admits the next request into the free slot.
-
-**<ins>2026-10-03</ins> ~ Forward pass matches the oracle**
-
-Wrote the GPT-2-small forward pass and checked it against the Hugging Face `gpt2` checkpoint on "The capital of France is". Token and position embeddings feed 12 pre-norm blocks, each doing causal attention and a tanh-GELU MLP, and the last position is multiplied by the tied token embedding to score the next token.
+- **Serving Infrastructure**: HTTP, networking, status codes, metrics, routing, etc. all belong to a separate server project that builds on `EngineCore`, [inference-server](https://github.com/sanchezner/inference-server).
+- **Beyond hardware**: multi-GPU and FP8... nope.
+- **Extraneous workloads**: training, fine-tuning, beam search, and other architectures outside the Llama family.
+- **Parity for its own sake**: not gonna be matching vLLM feature for feature, or a matmul kernel that competes with cuBLAS.
