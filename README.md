@@ -22,7 +22,7 @@ For the sake of learning, every path is checked against Hugging Face as a refere
 
 ## Non-goals
 
-- **Serving Infrastructure**: HTTP, networking, status codes, metrics, routing, etc. all belong to a separate server project that builds on `EngineCore`, [inference-server](https://github.com/sanchezner/inference-server).
+- **Serving Infrastructure**: HTTP, networking, status codes, metrics, routing, etc. all belong to a separate server project that builds on `EngineCore`, [inference-router](https://github.com/sanchezner/inference-router).
 - **Beyond hardware**: multi-GPU and FP8... nope.
 - **Extraneous workloads**: training, fine-tuning, beam search, and other architectures outside the Llama family.
 - **Parity for its own sake**: not gonna be matching vLLM feature for feature, or a matmul kernel that competes with cuBLAS.
