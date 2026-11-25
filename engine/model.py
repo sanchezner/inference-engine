@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 
 from engine.config import ModelConfig
+from engine.kernels.triton.rmsnorm import fused_rms_norm, rms_supported
 from engine.weights import LayerWeights, Weights
 
 
@@ -57,6 +58,13 @@ def forward(weights: Weights, cfg: ModelConfig, ids: torch.Tensor, rope: RopeTab
 
 
 def rms_norm(x, weight, eps):
+    # The eager chain is a dozen launches around a few kilobytes. One kernel replaces it.
+    if rms_supported(x, weight):
+        return fused_rms_norm(x, weight, eps)
+    return rms_norm_ref(x, weight, eps)
+
+
+def rms_norm_ref(x, weight, eps):
     # Statistics in fp32. Cast back so a bf16 weight does not promote the residual.
     variance = x.float().pow(2).mean(dim=-1, keepdim=True)
     normed = x.float() * torch.rsqrt(variance + eps)
