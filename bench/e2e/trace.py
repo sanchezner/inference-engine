@@ -74,6 +74,33 @@ def shared_prefix_trace(n, prefix_len, suffix_len, max_tokens, seed, vocab=1024,
     return rows
 
 
+def mixed_trace(n_short, short_len, short_tokens, n_long, long_len, long_tokens, seed, vocab=1024):
+    # Short chats are listed first. Admission walks the line in that order, so a long prompt cannot start ahead of them.
+    if isinstance(n_short, bool) or not isinstance(n_short, int) or n_short < 1:
+        raise ValueError(f"n_short must be an int >= 1, got {n_short!r}")
+    if isinstance(n_long, bool) or not isinstance(n_long, int) or n_long < 1:
+        raise ValueError(f"n_long must be an int >= 1, got {n_long!r}")
+    if isinstance(short_len, bool) or not isinstance(short_len, int) or short_len < 1:
+        raise ValueError(f"short_len must be an int >= 1, got {short_len!r}")
+    if isinstance(long_len, bool) or not isinstance(long_len, int) or long_len < 1:
+        raise ValueError(f"long_len must be an int >= 1, got {long_len!r}")
+    if isinstance(short_tokens, bool) or not isinstance(short_tokens, int) or short_tokens < 1:
+        raise ValueError(f"short_tokens must be an int >= 1, got {short_tokens!r}")
+    if isinstance(long_tokens, bool) or not isinstance(long_tokens, int) or long_tokens < 1:
+        raise ValueError(f"long_tokens must be an int >= 1, got {long_tokens!r}")
+    if isinstance(vocab, bool) or not isinstance(vocab, int) or vocab < 1:
+        raise ValueError(f"vocab must be an int >= 1, got {vocab!r}")
+    rng = random.Random(seed)
+    rows = []
+    for i in range(n_short):
+        prompt = tuple(rng.randrange(vocab) for _ in range(short_len))
+        rows.append(TraceRequest(0.0, prompt, short_tokens, f"s{i}"))
+    for i in range(n_long):
+        prompt = tuple(rng.randrange(vocab) for _ in range(long_len))
+        rows.append(TraceRequest(0.0, prompt, long_tokens, f"l{i}"))
+    return rows
+
+
 def write_trace(path, requests):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +151,8 @@ def replay(engine, trace, *, clock=None, sleep=None, step_cost=0.0, abort_ids=()
     peak_running = 0
     peak_waiting = 0
     steps = 0
-    budget = sum(item.max_tokens for item in items) + len(items) + len(abort_ids) + 2
+    # A capped prefill can take one step per prompt token, so the cap counts the prompt as well as the output.
+    budget = sum(len(item.prompt) + item.max_tokens for item in items) + len(items) + len(abort_ids) + 2
 
     def note():
         nonlocal peak_running, peak_waiting

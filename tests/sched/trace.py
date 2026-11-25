@@ -6,6 +6,7 @@ import torch
 
 from bench.e2e.trace import (
     TraceRequest,
+    mixed_trace,
     percentile,
     poisson_trace,
     read_trace,
@@ -27,7 +28,9 @@ def main():
     _summary_counts_tokens_and_gaps()
     _poisson_trace_is_seeded_and_fixed_length()
     _shared_prefix_trace_is_one_head_and_many_tails()
+    _mixed_trace_lists_short_chats_ahead_of_long_prompts()
     _a_shared_burst_hits_only_when_the_cache_is_on()
+    _a_chunked_prefill_replays_to_completion()
     _trace_file_roundtrip_and_rejects()
     _instant_engine_finishes_one_before_the_next()
     _a_slow_step_admits_the_next_arrival()
@@ -95,6 +98,35 @@ def _shared_prefix_trace_is_one_head_and_many_tails():
         assert "prefix_len" in str(exc)
     else:
         raise AssertionError("a zero-length shared prefix was accepted")
+
+
+def _mixed_trace_lists_short_chats_ahead_of_long_prompts():
+    rows = mixed_trace(3, short_len=4, short_tokens=5, n_long=2, long_len=9, long_tokens=2, seed=1, vocab=40)
+    assert mixed_trace(3, short_len=4, short_tokens=5, n_long=2, long_len=9, long_tokens=2, seed=1, vocab=40) == rows
+    assert mixed_trace(3, short_len=4, short_tokens=5, n_long=2, long_len=9, long_tokens=2, seed=2, vocab=40) != rows
+    assert [item.request_id for item in rows] == ["s0", "s1", "s2", "l0", "l1"]
+    assert all(item.t == 0.0 for item in rows)
+    assert all(len(item.prompt) == 4 and item.max_tokens == 5 for item in rows[:3])
+    assert all(len(item.prompt) == 9 and item.max_tokens == 2 for item in rows[3:])
+    try:
+        mixed_trace(1, short_len=1, short_tokens=1, n_long=0, long_len=1, long_tokens=1, seed=0)
+    except ValueError as exc:
+        assert "n_long" in str(exc)
+    else:
+        raise AssertionError("a trace with no long prompt was accepted")
+
+
+def _a_chunked_prefill_replays_to_completion():
+    # Ten prompt tokens at one per step used to trip a cap that only counted generated tokens.
+    clock = _Clock()
+    engine = EngineCore(
+        _forward_one, _forward_batch, _pool(16, 4), max_batch=2, clock=clock, prefill_budget=1,
+    )
+    prompt = tuple(range(1, 11))
+    summary, by_request = replay(engine, [TraceRequest(0.0, prompt, 2, "a")], clock=clock, sleep=clock.sleep)
+    assert [out.token_id for out in by_request["a"]] == _expect(prompt, 2)
+    assert summary["finished"] == 1
+    assert engine.stats().blocks_free == engine.stats().blocks_total
 
 
 def _a_shared_burst_hits_only_when_the_cache_is_on():

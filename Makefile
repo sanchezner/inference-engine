@@ -3,7 +3,7 @@ export PYTHONPATH := .
 export HF_HUB_DISABLE_PROGRESS_BARS := 1
 export TQDM_DISABLE := 1
 
-.PHONY: check bringup bench-bandwidth bench-profile bench-baseline bench-paged bench-prefix bench-fusion
+.PHONY: check bringup bench-bandwidth bench-profile bench-baseline bench-paged bench-prefix bench-fusion bench-chunked
 
 check:
 	$(PY) tests/unit/paged_attn.py
@@ -44,3 +44,6 @@ bench-prefix:
 
 bench-fusion:
 	$(PY) bench/fusion.py
+
+bench-chunked:
+	$(PY) bench/e2e/chunked.py

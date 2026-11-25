@@ -1,0 +1,265 @@
+{
+  "part": "chunked-prefill",
+  "date": "2026-11-25",
+  "host": "WSL2",
+  "command": "make bench-chunked",
+  "methodology": "Open-loop burst through EngineCore on CUDA bf16. 4 short chats and 2 long prompts arrive together at t=0. The chats are listed first, so admission seats them before a long prompt. A chat prompt is 8 tokens and asks for 32 new tokens. A long prompt is 2048 tokens and asks for 4. max_batch is 8, block size is 16, and the growth margin is one page. The pool is every request's full page demand plus one spare page per batch slot, so both modes fit without preemption and the budgeted run is not faster because the other ran out of pages. The prefix cache is off. Whole mode scores a prompt in the step that seats it. Chunked mode scores at most 256 prompt tokens per step, after decode, and a prompt already in progress spends that budget before a new one is seated. One warmup replay of each mode is discarded. 5 timed repetitions alternate which mode runs first. Each replay builds a new pool. Inter-token latency is the gap between consecutive generated tokens of one request, stamped when the token is sampled. p50 and p99 are nearest-rank over one replay. The short-chat figures use only the chats. A long prompt's own gaps are decode steps and would hide the stall. The reported value is the median of those per-replay percentiles, with the min and max. A later chunk still gathers the pages it already holds, so a chunk costs more than a fresh prefill of that many tokens. Clocks are not locked. The card also drives the display. Host is WSL2. HTTP is not in these numbers.",
+  "model": "HuggingFaceTB/SmolLM2-1.7B",
+  "model_revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "block_size": 16,
+  "prefill_budget": 256,
+  "short_requests": 4,
+  "short_len": 8,
+  "short_tokens": 32,
+  "long_requests": 2,
+  "long_len": 2048,
+  "long_tokens": 4,
+  "max_batch": 8,
+  "pages": 278,
+  "seed": 0,
+  "reps": 5,
+  "warmup_discarded": 1,
+  "environment": {
+    "host": "WSL2",
+    "python": "3.14.4",
+    "torch": "2.14.1+cu132",
+    "triton": "3.8.0",
+    "cuda_build": "13.2",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3070",
+    "gpu_total_bytes": 8589279232,
+    "sm_count": 46,
+    "nsight_systems": true,
+    "nsight_compute": true,
+    "nvidia_smi": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P2",
+      "clocks.sm": "1995",
+      "clocks.mem": "6801",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "149.43",
+      "utilization.gpu": "47"
+    },
+    "compute_apps": {
+      "ok": true,
+      "apps": [
+        "6288, [Not Found], [N/A]"
+      ]
+    },
+    "git": {
+      "ok": true,
+      "sha": "3a6ce11df330dcdfed4ec0b96826386e8f301455",
+      "dirty": true
+    }
+  },
+  "nvidia_smi_after_warmup": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1995",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "148.39",
+    "utilization.gpu": "43"
+  },
+  "whole": {
+    "short_itl_p50_s": {
+      "median": 0.020210030999805895,
+      "min": 0.016870411000127206,
+      "max": 0.029568055999789067
+    },
+    "short_itl_p99_s": {
+      "median": 0.45375973999989583,
+      "min": 0.44258397299972785,
+      "max": 0.4646876719998545
+    },
+    "short_ttft_p50_s": {
+      "median": 0.03356632999975773,
+      "min": 0.032854943000074854,
+      "max": 0.04738090800037753
+    },
+    "long_ttft_p50_s": {
+      "median": 0.27216243399971063,
+      "min": 0.2667850890002228,
+      "max": 0.2846019459998388
+    },
+    "itl_p50_s": {
+      "median": 0.018921506999959092,
+      "min": 0.016870391000338714,
+      "max": 0.029568055999789067
+    },
+    "itl_p99_s": {
+      "median": 0.45375973999989583,
+      "min": 0.44258397299972785,
+      "max": 0.4646876719998545
+    },
+    "elapsed_s": {
+      "median": 1.1084304030000567,
+      "min": 1.0937108339999213,
+      "max": 1.2884317359998931
+    },
+    "prefill_forwards": 6,
+    "runs": [
+      {
+        "short_itl_p50_s": 0.020210030999805895,
+        "short_itl_p99_s": 0.44711015900020357,
+        "short_ttft_p50_s": 0.03356632999975773,
+        "long_ttft_p50_s": 0.2667850890002228,
+        "itl_p50_s": 0.018921506999959092,
+        "itl_p99_s": 0.44711015900020357,
+        "elapsed_s": 1.0937108339999213,
+        "tokens": 136,
+        "prefill_forwards": 6
+      },
+      {
+        "short_itl_p50_s": 0.017617343999972945,
+        "short_itl_p99_s": 0.45375973999989583,
+        "short_ttft_p50_s": 0.032854943000074854,
+        "long_ttft_p50_s": 0.27216243399971063,
+        "itl_p50_s": 0.01761747499995181,
+        "itl_p99_s": 0.45375973999989583,
+        "elapsed_s": 1.1018751440001324,
+        "tokens": 136,
+        "prefill_forwards": 6
+      },
+      {
+        "short_itl_p50_s": 0.029568055999789067,
+        "short_itl_p99_s": 0.44258397299972785,
+        "short_ttft_p50_s": 0.038510338999913074,
+        "long_ttft_p50_s": 0.2670901779997621,
+        "itl_p50_s": 0.029568055999789067,
+        "itl_p99_s": 0.44258397299972785,
+        "elapsed_s": 1.2884317359998931,
+        "tokens": 136,
+        "prefill_forwards": 6
+      },
+      {
+        "short_itl_p50_s": 0.016870411000127206,
+        "short_itl_p99_s": 0.4597139900001821,
+        "short_ttft_p50_s": 0.03300803899992388,
+        "long_ttft_p50_s": 0.2785831039996083,
+        "itl_p50_s": 0.016870391000338714,
+        "itl_p99_s": 0.4597139900001821,
+        "elapsed_s": 1.1084304030000567,
+        "tokens": 136,
+        "prefill_forwards": 6
+      },
+      {
+        "short_itl_p50_s": 0.025662915999873803,
+        "short_itl_p99_s": 0.4646876719998545,
+        "short_ttft_p50_s": 0.04738090800037753,
+        "long_ttft_p50_s": 0.2846019459998388,
+        "itl_p50_s": 0.02581036099991252,
+        "itl_p99_s": 0.4646876719998545,
+        "elapsed_s": 1.245719791999818,
+        "tokens": 136,
+        "prefill_forwards": 6
+      }
+    ]
+  },
+  "chunked": {
+    "short_itl_p50_s": {
+      "median": 0.07040436199986289,
+      "min": 0.06740280499980145,
+      "max": 0.07654415799970593
+    },
+    "short_itl_p99_s": {
+      "median": 0.11869322799975635,
+      "min": 0.11206272499975967,
+      "max": 0.13000832499983517
+    },
+    "short_ttft_p50_s": {
+      "median": 0.04286245200000849,
+      "min": 0.03284820400040189,
+      "max": 0.05280947599976571
+    },
+    "long_ttft_p50_s": {
+      "median": 0.8522433479997744,
+      "min": 0.8337915669999347,
+      "max": 0.899936302000242
+    },
+    "itl_p50_s": {
+      "median": 0.06586042000026282,
+      "min": 0.053832872999919346,
+      "max": 0.07645888900015052
+    },
+    "itl_p99_s": {
+      "median": 0.11869322799975635,
+      "min": 0.11206272499975967,
+      "max": 0.13000832499983517
+    },
+    "elapsed_s": {
+      "median": 1.9366488480000044,
+      "min": 1.905325453000387,
+      "max": 2.0472630579997713
+    },
+    "prefill_forwards": 22,
+    "runs": [
+      {
+        "short_itl_p50_s": 0.07025861900001473,
+        "short_itl_p99_s": 0.12698456400039504,
+        "short_ttft_p50_s": 0.041506471000047895,
+        "long_ttft_p50_s": 0.8522433479997744,
+        "itl_p50_s": 0.053832872999919346,
+        "itl_p99_s": 0.12698456400039504,
+        "elapsed_s": 1.9366488480000044,
+        "tokens": 136,
+        "prefill_forwards": 22
+      },
+      {
+        "short_itl_p50_s": 0.07040436199986289,
+        "short_itl_p99_s": 0.11206272499975967,
+        "short_ttft_p50_s": 0.05280947599976571,
+        "long_ttft_p50_s": 0.8337915669999347,
+        "itl_p50_s": 0.06728581699962888,
+        "itl_p99_s": 0.11206272499975967,
+        "elapsed_s": 1.905325453000387,
+        "tokens": 136,
+        "prefill_forwards": 22
+      },
+      {
+        "short_itl_p50_s": 0.06740280499980145,
+        "short_itl_p99_s": 0.11271304899992174,
+        "short_ttft_p50_s": 0.03284820400040189,
+        "long_ttft_p50_s": 0.843728831000135,
+        "itl_p50_s": 0.06586042000026282,
+        "itl_p99_s": 0.11271304899992174,
+        "elapsed_s": 1.9296696360001988,
+        "tokens": 136,
+        "prefill_forwards": 22
+      },
+      {
+        "short_itl_p50_s": 0.07654415799970593,
+        "short_itl_p99_s": 0.13000832499983517,
+        "short_ttft_p50_s": 0.04286245200000849,
+        "long_ttft_p50_s": 0.899936302000242,
+        "itl_p50_s": 0.07645888900015052,
+        "itl_p99_s": 0.13000832499983517,
+        "elapsed_s": 2.0472630579997713,
+        "tokens": 136,
+        "prefill_forwards": 22
+      },
+      {
+        "short_itl_p50_s": 0.07300642200016227,
+        "short_itl_p99_s": 0.11869322799975635,
+        "short_ttft_p50_s": 0.04826294100030282,
+        "long_ttft_p50_s": 0.8752014539995798,
+        "itl_p50_s": 0.0632222389999697,
+        "itl_p99_s": 0.11869322799975635,
+        "elapsed_s": 1.966079888999957,
+        "tokens": 136,
+        "prefill_forwards": 22
+      }
+    ]
+  },
+  "short_itl_p99_reduction": 0.7384227432786707
+}
