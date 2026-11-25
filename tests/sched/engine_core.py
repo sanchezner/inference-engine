@@ -29,6 +29,12 @@ def main():
     _margin_covering_the_budget_holds_the_spare_page()
     _preemption_matches_a_roomy_run()
     _a_preempted_request_can_stand_past_the_cap()
+    _a_budget_above_the_prompt_matches_the_uncapped_steps()
+    _a_chunk_emits_nothing_until_the_prompt_is_scored()
+    _a_step_splits_the_budget_across_waiters()
+    _decode_continues_during_a_chunked_prefill()
+    _chunked_prefill_matches_an_uncapped_run()
+    _chunked_interleaving_conserves_pages()
 
 
 def _rejects_bad_requests():
@@ -81,6 +87,20 @@ def _rejects_bad_requests():
         assert "growth_margin" in str(exc)
     else:
         raise AssertionError("a bool growth margin was accepted")
+
+    try:
+        _engine(_pool(1, 4), max_batch=1, prefill_budget=0)
+    except ValueError as exc:
+        assert "prefill_budget" in str(exc)
+    else:
+        raise AssertionError("a prefill budget of 0 was accepted")
+
+    try:
+        _engine(_pool(1, 4), max_batch=1, prefill_budget=True)
+    except ValueError as exc:
+        assert "prefill_budget" in str(exc)
+    else:
+        raise AssertionError("a bool prefill budget was accepted")
 
 
 def _length_and_stop_match_the_recurrence():
@@ -355,11 +375,11 @@ def _interleaving_conserves_pages():
         _one_interleaving(seed)
 
 
-def _one_interleaving(seed):
+def _one_interleaving(seed, prefill_budget=None):
     # Six pages cannot cover three fat requests at once, so some have to wait.
     rng = random.Random(seed)
     pool = _pool(6, 4)
-    engine = _engine(pool, max_batch=3, max_waiting=5)
+    engine = _engine(pool, max_batch=3, max_waiting=5, prefill_budget=prefill_budget)
     accepted = []
     for _ in range(250):
         roll = rng.randrange(3)
@@ -520,8 +540,122 @@ def _a_preempted_request_can_stand_past_the_cap():
     _conserved(pool, engine)
 
 
-def _run(reqs, pages, margin):
-    engine = _engine(_pool(pages, 4), max_batch=4, growth_margin=margin)
+def _a_budget_above_the_prompt_matches_the_uncapped_steps():
+    reqs = [
+        Request("grow", (1,), max_new_tokens=4),
+        Request("hold", (2, 2), max_new_tokens=2),
+    ]
+    bare = _steps(_engine(_pool(8, 4), max_batch=2), reqs)
+    capped = _steps(_engine(_pool(8, 4), max_batch=2, prefill_budget=50), reqs)
+    assert bare == capped
+
+
+def _a_chunk_emits_nothing_until_the_prompt_is_scored():
+    # 10 prompt tokens, 4 per step. The first generated token waits until the third step.
+    pool = _pool(16, 4)
+    engine = _engine(pool, max_batch=1, prefill_budget=4)
+    prompt = tuple(range(1, 11))
+    engine.add_request(Request("p", prompt, max_new_tokens=1))
+    assert engine.stats().pending_prefill_tokens == 10
+    assert engine.step() == []
+    assert engine.stats().requests_running == 1
+    assert engine.stats().pending_prefill_tokens == 6
+    assert engine.stats().counters.tokens_generated == 0
+    assert engine.step() == []
+    assert engine.stats().pending_prefill_tokens == 2
+    third = engine.step()
+    assert [(out.token_id, out.finish_reason, out.cached_tokens) for out in third] == [
+        ((prompt[-1] + 1) % VOCAB, "length", 0),
+    ]
+    assert engine.stats().requests_running == 0
+    assert engine.stats().pending_prefill_tokens == 0
+    assert engine.stats().blocks_free == 16
+    _conserved(pool, engine)
+
+
+def _a_step_splits_the_budget_across_waiters():
+    pool = _pool(16, 4)
+    engine = _engine(pool, max_batch=2, prefill_budget=6)
+    engine.add_request(Request("a", (1, 1, 1, 1), max_new_tokens=1))
+    engine.add_request(Request("b", (2, 2, 2, 2), max_new_tokens=1))
+    first = engine.step()
+    assert [(out.request_id, out.finish_reason) for out in first] == [("a", "length")]
+    assert engine.stats().requests_running == 1
+    assert engine.stats().pending_prefill_tokens == 2
+    second = engine.step()
+    assert [(out.request_id, out.token_id, out.finish_reason) for out in second] == [(
+        "b", (2 + 1) % VOCAB, "length",
+    )]
+    assert engine.stats().blocks_free == 16
+    _conserved(pool, engine)
+
+
+def _decode_continues_during_a_chunked_prefill():
+    # chat is already generating. long is scored 3 tokens at a time and must not skip chat's turns.
+    pool = _pool(16, 4)
+    engine = _engine(pool, max_batch=2, prefill_budget=3)
+    engine.add_request(Request("chat", (1,), max_new_tokens=8))
+    first = engine.step()
+    assert [out.token_id for out in first] == [2]
+    long_prompt = tuple(range(2, 12))
+    engine.add_request(Request("long", long_prompt, max_new_tokens=2))
+    chat = [2]
+    long_tokens = []
+    saw_long_waiting_on_its_prompt = False
+    for _ in range(24):
+        outs = engine.step()
+        long_scoring = any(slot.request_id == "long" and slot.last_token is None for slot in engine._running)
+        if long_scoring:
+            assert [out.request_id for out in outs] == ["chat"]
+            saw_long_waiting_on_its_prompt = True
+        for out in outs:
+            if out.request_id == "chat":
+                chat.append(out.token_id)
+            else:
+                long_tokens.append(out.token_id)
+        _conserved(pool, engine)
+        stats = engine.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
+    else:
+        raise AssertionError("chunked run did not finish")
+    assert saw_long_waiting_on_its_prompt
+    assert chat == _expect((1,), 8)
+    assert long_tokens == _expect(long_prompt, 2)
+    assert engine.stats().blocks_free == 16
+
+
+def _chunked_prefill_matches_an_uncapped_run():
+    reqs = [
+        Request("long", tuple(range(10)), max_new_tokens=4),
+        Request("short", (7, 7), max_new_tokens=3),
+    ]
+    assert _run(reqs, pages=16, margin=1, prefill_budget=3) == _run(reqs, pages=16, margin=1)
+    assert _run(reqs, pages=16, margin=1, prefill_budget=1) == _run(reqs, pages=16, margin=1)
+
+
+def _chunked_interleaving_conserves_pages():
+    for seed in range(4):
+        _one_interleaving(seed, prefill_budget=3)
+
+
+def _steps(engine, reqs=None):
+    if reqs is not None:
+        for req in reqs:
+            engine.add_request(req)
+    got = []
+    for _ in range(32):
+        outs = engine.step()
+        got.append([(out.request_id, out.token_id, out.finish_reason) for out in outs])
+        stats = engine.stats()
+        _conserved(engine.pool, engine)
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            return got
+    raise AssertionError("engine did not finish")
+
+
+def _run(reqs, pages, margin, prefill_budget=None):
+    engine = _engine(_pool(pages, 4), max_batch=4, growth_margin=margin, prefill_budget=prefill_budget)
     for req in reqs:
         engine.add_request(req)
     return _drain(engine)
@@ -536,10 +670,11 @@ class _Clock:
         return self.t
 
 
-def _engine(pool, max_batch, clock=None, max_waiting=256, growth_margin=1):
+def _engine(pool, max_batch, clock=None, max_waiting=256, growth_margin=1, prefill_budget=None):
     return EngineCore(
         _forward_one, _forward_batch, pool, max_batch,
         clock=clock, max_waiting=max_waiting, growth_margin=growth_margin,
+        prefill_budget=prefill_budget,
     )
 
 

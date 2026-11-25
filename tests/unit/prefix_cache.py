@@ -20,6 +20,7 @@ def main():
     _hit_tokens_land_on_the_first_output()
     _an_empty_pool_refuses()
     _a_preempted_full_block_is_reused()
+    _a_preempted_chunk_keeps_its_full_block()
 
 
 def _salt_and_chain_change_the_hash():
@@ -334,14 +335,55 @@ def _write(seq, tokens, record):
     return row, seq
 
 
-def _engine(pool, forwards=None, cache=False, max_batch=2, growth_margin=1):
+def _a_preempted_chunk_keeps_its_full_block():
+    # old needs its second page while new holds a full block and a partial tail.
+    # The tail is what old takes, so the full block stays cached and new pins it again.
+    record = {}
+    pool = _pool(3, 4)
+    engine = _engine(pool, _suffix_only(record), cache=True, max_batch=2, growth_margin=0, prefill_budget=2)
+    engine.add_request(Request("old", (1,), max_new_tokens=8))
+    engine.step()
+    prompt = (2, 2, 2, 2, 3, 3, 3, 3, 4, 4)
+    engine.add_request(Request("new", prompt, max_new_tokens=1))
+    cached_page = None
+    saw_cached = False
+    saw_repin = False
+    outs = []
+    for _ in range(40):
+        outs.extend(engine.step())
+        _pages_engine(pool, engine)
+        running = {slot.request_id: slot for slot in engine._running}
+        waiting = {item.request.request_id for item in engine._waiting}
+        if "new" in running and len(running["new"].written) >= 4 and cached_page is None:
+            cached_page = running["new"].seq.blocks[0]
+        if cached_page is not None and "new" in waiting:
+            assert pool.cache.holds(cached_page)
+            assert pool.refcount[cached_page] == 0
+            saw_cached = True
+        if saw_cached and "new" in running and running["new"].seq.blocks and running["new"].seq.blocks[0] == cached_page:
+            assert running["new"].seq.seq_len >= 4
+            saw_repin = True
+        stats = engine.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
+    else:
+        raise AssertionError("chunked prefill did not finish")
+    assert saw_cached and saw_repin
+    got = [out.token_id for out in outs if out.request_id == "new" and out.token_id is not None]
+    assert got == [(prompt[-1] + 1) % VOCAB]
+    assert engine.stats().blocks_free == engine.stats().blocks_total
+    assert engine.stats().counters.prefix_cache_hit_tokens > 0
+    _pages_engine(pool, engine)
+
+
+def _engine(pool, forwards=None, cache=False, max_batch=2, growth_margin=1, prefill_budget=None):
     if cache:
         attach_prefix_cache(pool, "m")
     if forwards is None:
         one, batch = _forward_one, _forward_batch
     else:
         one, batch = forwards
-    return EngineCore(one, batch, pool, max_batch, growth_margin=growth_margin)
+    return EngineCore(one, batch, pool, max_batch, growth_margin=growth_margin, prefill_budget=prefill_budget)
 
 
 def _forward_one(ids, seq):
