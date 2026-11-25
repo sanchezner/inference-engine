@@ -15,6 +15,7 @@ from engine.paged import (
     reserve_pages,
 )
 from engine.sched.request import EngineCounters, EngineStats, OutputTimestamps, QueueFull, Request, StepOutput
+from engine.sched.sampling import ensure_generator, sample_token
 
 
 @dataclass
@@ -24,6 +25,8 @@ class _Waiting:
     generated: int = 0
     # Already returned to the caller. The last of these is not in a page yet.
     emitted: tuple[int, ...] = ()
+    # Set once this request has sampled. Preemption parks it here so the stream survives.
+    generator: torch.Generator | None = None
 
 
 @dataclass
@@ -42,6 +45,7 @@ class _Running:
     cached_tokens: int = 0
     # Tokens already returned before this run. A preempted prefill requeues these whole.
     recompute: tuple[int, ...] = ()
+    generator: torch.Generator | None = None
 
 
 # Ticket window in front of the paged loop. No threads: the caller decides when a step runs.
@@ -223,7 +227,9 @@ class EngineCore:
                 )
         # Full blocks stay cached. The partial tail is freed and recomputed on resume.
         release_pages(slot.seq)
-        self._waiting.appendleft(_Waiting(slot.request, slot.arrival, slot.generated, emitted))
+        self._waiting.appendleft(_Waiting(
+            slot.request, slot.arrival, slot.generated, emitted, slot.generator,
+        ))
 
     def _decoding(self) -> list[_Running]:
         return [slot for slot in self._running if slot.last_token is not None]
@@ -327,6 +333,7 @@ class EngineCore:
             written=list(tokens[:cached_tokens]),
             cached_tokens=cached_tokens,
             recompute=item.emitted,
+            generator=item.generator,
         )
         self._running.append(slot)
         self._extend_to(slot, tokens, chunk_end, outputs)
@@ -372,7 +379,7 @@ class EngineCore:
         publish_written(self.pool.cache, seq.blocks, written)
         if chunk_end < len(tokens):
             return
-        token = int(torch.argmax(logits, dim=-1).reshape(-1)[0].item())
+        token = self._sample_one(slot, logits)
         generated = slot.generated + 1
         reason = _finish_reason(token, generated, slot.max_new_tokens, slot.stop_ids)
         # cached_tokens is only reported on the request's first output.
@@ -391,7 +398,7 @@ class EngineCore:
         decoding = self._decoding()
         last = torch.tensor([slot.last_token for slot in decoding], dtype=torch.long).view(-1, 1)
         logits, _seqs = self.forward_batch(last, [slot.seq for slot in decoding])
-        tokens = [int(token) for token in torch.argmax(logits, dim=-1).tolist()]
+        tokens = self._sample_rows(decoding, logits)
         outputs = []
         finished = set()
         for slot, token in zip(decoding, tokens):
@@ -416,6 +423,17 @@ class EngineCore:
         if finished:
             self._running = [slot for slot in self._running if id(slot) not in finished]
         return outputs
+
+    def _sample_rows(self, slots, logits) -> list[int]:
+        # A sampled row has its own generator, so only an all-greedy batch shares one argmax transfer.
+        if all(slot.request.sampling.temperature == 0.0 for slot in slots):
+            return [int(token) for token in torch.argmax(logits, dim=-1).tolist()]
+        return [self._sample_one(slot, row) for slot, row in zip(slots, logits)]
+
+    def _sample_one(self, slot: _Running, logits) -> int:
+        params = slot.request.sampling
+        slot.generator = ensure_generator(params, slot.generator, logits.device)
+        return sample_token(logits, params, slot.generator)
 
     def _token(self, request_id, token, reason, arrival, cached_tokens=0) -> StepOutput:
         self._tokens += 1

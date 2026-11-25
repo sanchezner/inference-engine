@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 
 
@@ -9,16 +10,41 @@ class QueueFull(Exception):
         super().__init__(f"waiting queue is full ({waiting}/{max_waiting})")
 
 
-# Only greedy is legal until M5. A non-zero temperature must fail here, not silently argmax.
+# temperature 0 is argmax and ignores the filters. top_k 0 and top_p 1 leave the row unfiltered.
 @dataclass(frozen=True)
 class SamplingParams:
     temperature: float = 0.0
+    top_k: int = 0
+    top_p: float = 1.0
+    seed: int | None = None
 
     def __post_init__(self):
-        if self.temperature != 0.0:
-            raise ValueError(
-                f"only greedy sampling is accepted until M5, got temperature {self.temperature}"
-            )
+        temperature = self.temperature
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature)
+            or temperature < 0
+        ):
+            raise ValueError(f"temperature must be a finite number >= 0, got {temperature!r}")
+        top_k = self.top_k
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
+            raise ValueError(f"top_k must be an int >= 0, got {top_k!r}")
+        top_p = self.top_p
+        if (
+            isinstance(top_p, bool)
+            or not isinstance(top_p, (int, float))
+            or not math.isfinite(top_p)
+            or not 0 < top_p <= 1
+        ):
+            raise ValueError(f"top_p must be a finite number in (0, 1], got {top_p!r}")
+        seed = self.seed
+        if seed is not None and (
+            isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64
+        ):
+            raise ValueError(f"seed must be an int in [0, 2**64) or None, got {seed!r}")
+        object.__setattr__(self, "temperature", float(temperature))
+        object.__setattr__(self, "top_p", float(top_p))
 
 
 @dataclass(frozen=True)

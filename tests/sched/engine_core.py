@@ -6,6 +6,7 @@ from engine.paged import PagePool, reserve_pages
 from engine.schedule import generate_continuous_paged
 from engine.sched.engine_core import EngineCore
 from engine.sched.request import QueueFull, Request, SamplingParams
+from engine.sched.sampling import sample_token
 
 VOCAB = 32
 
@@ -35,16 +36,14 @@ def main():
     _decode_continues_during_a_chunked_prefill()
     _chunked_prefill_matches_an_uncapped_run()
     _chunked_interleaving_conserves_pages()
+    _rejects_bad_sampling()
+    _greedy_still_matches_the_recurrence()
+    _a_seed_matches_its_own_stream_beside_another()
+    _preemption_keeps_the_sample_stream()
+    _chunked_prefill_keeps_the_sample_stream()
 
 
 def _rejects_bad_requests():
-    try:
-        SamplingParams(temperature=0.7)
-    except ValueError as exc:
-        assert "greedy" in str(exc)
-    else:
-        raise AssertionError("non-zero temperature was accepted")
-
     try:
         Request("", (1,), 1)
     except ValueError as exc:
@@ -639,6 +638,107 @@ def _chunked_interleaving_conserves_pages():
         _one_interleaving(seed, prefill_budget=3)
 
 
+def _rejects_bad_sampling():
+    SamplingParams(temperature=0.7, top_k=4, top_p=0.9, seed=1)
+    bad = (
+        {"temperature": -0.1},
+        {"temperature": True},
+        {"temperature": float("nan")},
+        {"top_k": -1},
+        {"top_k": True},
+        {"top_k": 1.5},
+        {"top_p": 0},
+        {"top_p": 1.1},
+        {"top_p": True},
+        {"seed": -1},
+        {"seed": True},
+        {"seed": 2**64},
+    )
+    for kwargs in bad:
+        try:
+            SamplingParams(**kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted sampling params {kwargs}")
+
+
+def _greedy_still_matches_the_recurrence():
+    sampling = SamplingParams(temperature=0, top_k=2, top_p=0.2, seed=3)
+    pool = _pool(16, 4)
+    engine = _engine(pool, max_batch=2)
+    engine.add_request(Request("paris", (1, 2), max_new_tokens=4, sampling=sampling))
+    first = engine.step()
+    assert [out.token_id for out in first] == [3]
+    assert engine._running[0].generator is None
+    assert _drain(engine)["paris"] == [(4, None), (5, None), (6, "length")]
+    _conserved(pool, engine)
+
+
+def _a_seed_matches_its_own_stream_beside_another():
+    left = SamplingParams(temperature=1.0, seed=1)
+    right = SamplingParams(temperature=1.0, seed=2)
+    pool = _pool(16, 4)
+    engine = _open_engine(pool, max_batch=2)
+    engine.add_request(Request("left", (1, 2), max_new_tokens=6, sampling=left))
+    engine.add_request(Request("right", (3,), max_new_tokens=5, sampling=right))
+    got = _drain(engine)
+    assert _ids(got["left"]) == _reference_tokens(left, 6)
+    assert _ids(got["right"]) == _reference_tokens(right, 5)
+    assert engine._running == []
+    assert got["left"][-1][1] == "length" and got["right"][-1][1] == "length"
+    _conserved(pool, engine)
+
+    # top-k of 1 is argmax, so the seed never gets a choice.
+    forced = SamplingParams(temperature=1.0, top_k=1, seed=9)
+    peaked = int(torch.argmax(_LOGITS).item())
+    alone = _open_engine(_pool(8, 4), max_batch=1)
+    alone.add_request(Request("peak", (4,), max_new_tokens=4, sampling=forced))
+    assert _ids(_drain(alone)["peak"]) == [peaked, peaked, peaked, peaked]
+
+
+def _preemption_keeps_the_sample_stream():
+    left = SamplingParams(temperature=1.0, seed=11)
+    right = SamplingParams(temperature=1.0, seed=12)
+    reqs = [
+        Request("old", (1,), max_new_tokens=8, sampling=left),
+        Request("new", (2,), max_new_tokens=5, sampling=right),
+    ]
+    roomy = _drain_open(_pool(8, 4), reqs, growth_margin=0)
+    tight = _open_engine(_pool(2, 4), max_batch=2, growth_margin=0)
+    for req in reqs:
+        tight.add_request(req)
+    saw_parked_generator = False
+    grouped = {}
+    for _ in range(32):
+        parked = [item for item in tight._waiting if item.request.request_id == "new"]
+        if parked and parked[0].generator is not None:
+            assert any(slot.request_id == "old" for slot in tight._running)
+            saw_parked_generator = True
+        outs = tight.step()
+        for out in outs:
+            grouped.setdefault(out.request_id, []).append((out.token_id, out.finish_reason))
+        _conserved(tight.pool, tight)
+        stats = tight.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
+    else:
+        raise AssertionError("tight sampled engine did not finish")
+    assert saw_parked_generator
+    assert grouped == roomy
+    assert _ids(grouped["old"]) == _reference_tokens(left, 8)
+    assert _ids(grouped["new"]) == _reference_tokens(right, 5)
+    assert tight.stats().blocks_free == tight.stats().blocks_total
+
+
+def _chunked_prefill_keeps_the_sample_stream():
+    sampling = SamplingParams(temperature=1.0, top_p=0.9, seed=4)
+    req = Request("long", tuple(range(1, 11)), max_new_tokens=4, sampling=sampling)
+    whole = _drain_open(_pool(16, 4), [req])
+    chunked = _drain_open(_pool(16, 4), [req], prefill_budget=3)
+    assert whole == chunked
+    assert _ids(whole["long"]) == _reference_tokens(sampling, 4)
+
+
 def _steps(engine, reqs=None):
     if reqs is not None:
         for req in reqs:
@@ -708,6 +808,53 @@ def _advance(seq, n_new, last_id):
     row = torch.zeros(VOCAB)
     row[nxt] = 10
     return row
+
+
+_LOGITS = torch.tensor(
+    [0.4, 1.7, 0.1, 1.2, 0.8, 0.0, 1.5, 0.3] + [0.05] * (VOCAB - 8),
+    dtype=torch.float32,
+)
+
+
+def _open_one(ids, seq):
+    n_new = ids.shape[1] - seq.seq_len
+    if n_new <= 0:
+        raise ValueError("paged forward was given no new tokens")
+    reserve_pages(seq, seq.seq_len + n_new)
+    seq.seq_len += n_new
+    return _LOGITS.view(1, -1), seq
+
+
+def _open_batch(ids, seqs):
+    rows = []
+    for seq in seqs:
+        reserve_pages(seq, seq.seq_len + ids.shape[1])
+        seq.seq_len += ids.shape[1]
+        rows.append(_LOGITS)
+    return torch.stack(rows), seqs
+
+
+def _open_engine(pool, max_batch, **kwargs):
+    return EngineCore(_open_one, _open_batch, pool, max_batch, **kwargs)
+
+
+def _drain_open(pool, reqs, **kwargs):
+    engine = _open_engine(pool, max_batch=2, **kwargs)
+    for req in reqs:
+        engine.add_request(req)
+    got = _drain(engine)
+    _conserved(pool, engine)
+    return got
+
+
+def _reference_tokens(params, n):
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(params.seed)
+    return [sample_token(_LOGITS, params, generator) for _ in range(n)]
+
+
+def _ids(pairs):
+    return [token for token, _reason in pairs]
 
 
 def _expect(prompt, budget, stop=()):
