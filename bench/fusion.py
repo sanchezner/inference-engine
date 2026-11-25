@@ -1,5 +1,6 @@
-# Decode step with the fused norm against the eager norm, plus the launch counts that picked it.
+# Decode step with the fused rotation against the eager one, plus the launch counts that picked it.
 # make bench-fusion
+# The norm fusion's numbers stay in bench/results/2026-11-24-fusion.json. This run writes the rope file.
 
 import json
 import statistics
@@ -14,12 +15,12 @@ from torch.profiler import ProfilerActivity, profile
 
 from bench.env import environment, nvidia_smi
 from engine.config import ModelConfig
-from engine.kernels.triton.rmsnorm import fused_rms_norm
-from engine.model import RopeTables, rms_norm_ref
+from engine.kernels.triton.rope import fused_rope
+from engine.model import RopeTables, apply_rope_ref
 from engine.paged import forward_paged, forward_paged_batch, new_page_pool, new_sequence
 from engine.weights import Weights
 
-import engine.kernels.triton.rmsnorm as rmsnorm
+import engine.kernels.triton.rope as rope_kernel
 import engine.model as model
 import engine.paged as paged
 
@@ -41,13 +42,14 @@ BANDWIDTH_FILE = "bench/results/2026-10-31-bandwidth.json"
 METHODOLOGY = (
     "SmolLM2-1.7B, CUDA bf16, block size 16, WSL2, clocks not locked. "
     "A decode step is forward_paged_batch plus argmax and a per-sequence .item(), timed with CUDA events after a sync. "
-    "Each sequence is prefilled once; timed steps rewind seq_len. "
+    "Each sequence is prefilled once with the fused rotation; timed steps rewind seq_len. "
     "Eager and fused alternate step by step after five warmup steps of each, twenty samples, median. "
-    "Fused is one RMSNorm kernel; eager is rms_norm_ref, the cast-square-mean chain. "
+    "Both sides use the fused RMSNorm. Eager rotation is apply_rope_ref. Fused rotation is one kernel for q and k. "
     "Launch counts are a two-step profiler trace of batch 8, context 512. A kernel is charged to the innermost annotation. "
-    "RMSNorm is the fusion because it is the largest of those counts. RoPE is the next count. The SiLU multiply is 24 launches. "
-    "The microbench is one norm over 8192 rows of width 2048. "
-    "Streaming bytes are one read of x and one write of y. The kernel rereads x, but a row is 4KB and still in L1, and the weight is 4KB. "
+    "RoPE is the fusion because the fused-norm profile still had it at 384 launches. "
+    "The microbench is one rotation of q and k, shape [16, 32, 512, 64], with fp32 cos and sin. "
+    "Each program reads one contiguous head, so a transposed query is the same stream as this contiguous one. "
+    "Streaming bytes are one read and one write of q and of k, plus one read of cos and of sin. "
     "GB/s uses decimal 1e9 and the median of five windows. The fraction uses the median copy in "
     + BANDWIDTH_FILE
     + "."
@@ -135,7 +137,7 @@ def _restore():
 
 
 def _mode(name: str):
-    rmsnorm.use_fused = name == "fused"
+    rope_kernel.use_fused = name == "fused"
 
 
 def _prefill(weights, cfg, rope, seq, n_tokens, generator):
@@ -309,22 +311,25 @@ def _time_calls(fn) -> dict:
 
 
 def _micro(bandwidth: float) -> dict:
-    rows, hidden = 8192, 2048
+    batch, n_heads, time, dim = 16, 32, 512, 64
     gen = torch.Generator(device="cuda")
     gen.manual_seed(0)
-    x = torch.randn(rows, hidden, device="cuda", dtype=DTYPE, generator=gen)
-    w = torch.randn(hidden, device="cuda", dtype=DTYPE, generator=gen)
-    eps = 1e-5
-    # One read of x and one write of y. The second load of the row hits L1, and the weight is 4KB.
-    nbytes = rows * hidden * x.element_size() * 2
-    eager = _time_calls(lambda: rms_norm_ref(x, w, eps))
-    fused = _time_calls(lambda: fused_rms_norm(x, w, eps))
+    q = torch.randn(batch, n_heads, time, dim, device="cuda", dtype=DTYPE, generator=gen)
+    k = torch.randn(batch, n_heads, time, dim, device="cuda", dtype=DTYPE, generator=gen)
+    cos = torch.randn(batch, time, dim, device="cuda", dtype=torch.float32, generator=gen)
+    sin = torch.randn(batch, time, dim, device="cuda", dtype=torch.float32, generator=gen)
+    # Read and write q and k. Cos and sin are read once. A head is contiguous, so the transpose in project_qkv is the same stream.
+    nbytes = (q.numel() + k.numel()) * q.element_size() * 2 + (cos.numel() + sin.numel()) * cos.element_size()
+    eager = _time_calls(lambda: apply_rope_ref(q, k, cos, sin))
+    fused = _time_calls(lambda: fused_rope(q, k, cos, sin))
     for row in (eager, fused):
         row["gbps"] = (nbytes / 1e9) / (row["median_ms"] / 1e3)
         row["fraction_of_copy"] = (row["gbps"] * 1e9) / bandwidth
     return {
-        "rows": rows,
-        "hidden": hidden,
+        "batch": batch,
+        "heads": n_heads,
+        "time": time,
+        "dim": dim,
         "dtype": "bf16",
         "bytes": nbytes,
         "eager": eager,
@@ -382,20 +387,20 @@ def main():
                             row = launches[name]
                             print(
                                 f"  {name} launches {row['total_launches_per_step']:.0f}  "
-                                f"rms {row['per_step'].get('rms_norm', {}).get('launches', 0):.0f}",
+                                f"rope {row['per_step'].get('rope', {}).get('launches', 0):.0f}",
                                 flush=True,
                             )
                     finally:
                         _restore()
             micro = _micro(bandwidth)
     finally:
-        rmsnorm.use_fused = True
+        rope_kernel.use_fused = True
     print(
         f"micro  eager {micro['eager']['gbps']:.1f} GB/s  fused {micro['fused']['gbps']:.1f} GB/s",
         flush=True,
     )
     report = {
-        "part": "fusion",
+        "part": "rope",
         "date": date.today().isoformat(),
         "host": "WSL2",
         "command": "make bench-fusion",
@@ -412,7 +417,7 @@ def main():
         "launches": launches,
         "micro": micro,
     }
-    out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-fusion.json"
+    out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-rope.json"
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)
 

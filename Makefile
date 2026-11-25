@@ -9,6 +9,7 @@ check:
 	$(PY) tests/unit/paged_attn.py
 	$(PY) tests/unit/reshape_cache.py
 	$(PY) tests/unit/rmsnorm.py
+	$(PY) tests/unit/rope.py
 	$(PY) tests/unit/prefix_cache.py
 	$(PY) tests/sched/engine_core.py
 	$(PY) tests/sched/trace.py

@@ -4,6 +4,7 @@ import torch
 
 from engine.config import ModelConfig
 from engine.kernels.triton.rmsnorm import fused_rms_norm, rms_supported
+from engine.kernels.triton.rope import fused_rope, rope_supported
 from engine.weights import LayerWeights, Weights
 
 
@@ -77,8 +78,14 @@ def rotate_half(x):
 
 
 def apply_rope(q, k, cos, sin):
-    # Tables stay fp32. The rotation is done in fp32 and cast back so the
-    # following matmul stays in the activation dtype.
+    # The query is not stored in the cache, so its rotation is a launch either way. The key rides along.
+    if rope_supported(q, k, cos, sin):
+        return fused_rope(q, k, cos, sin)
+    return apply_rope_ref(q, k, cos, sin)
+
+
+def apply_rope_ref(q, k, cos, sin):
+    # Tables stay fp32. Rotate in fp32 and cast back so the next matmul keeps the activation dtype.
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
     return _rotate(q, cos, sin), _rotate(k, cos, sin)

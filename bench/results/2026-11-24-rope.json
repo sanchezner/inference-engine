@@ -1,0 +1,239 @@
+{
+  "part": "rope",
+  "date": "2026-11-24",
+  "host": "WSL2",
+  "command": "make bench-fusion",
+  "methodology": "SmolLM2-1.7B, CUDA bf16, block size 16, WSL2, clocks not locked. A decode step is forward_paged_batch plus argmax and a per-sequence .item(), timed with CUDA events after a sync. Each sequence is prefilled once with the fused rotation; timed steps rewind seq_len. Eager and fused alternate step by step after five warmup steps of each, twenty samples, median. Both sides use the fused RMSNorm. Eager rotation is apply_rope_ref. Fused rotation is one kernel for q and k. Launch counts are a two-step profiler trace of batch 8, context 512. A kernel is charged to the innermost annotation. RoPE is the fusion because the fused-norm profile still had it at 384 launches. The microbench is one rotation of q and k, shape [16, 32, 512, 64], with fp32 cos and sin. Each program reads one contiguous head, so a transposed query is the same stream as this contiguous one. Streaming bytes are one read and one write of q and of k, plus one read of cos and of sin. GB/s uses decimal 1e9 and the median of five windows. The fraction uses the median copy in bench/results/2026-10-31-bandwidth.json.",
+  "model": "HuggingFaceTB/SmolLM2-1.7B",
+  "n_layers": 24,
+  "hidden_size": 2048,
+  "bandwidth_source": "bench/results/2026-10-31-bandwidth.json",
+  "bandwidth_median_bytes_per_s": 378672307987.7489,
+  "environment": {
+    "host": "WSL2",
+    "python": "3.14.4",
+    "torch": "2.14.1+cu132",
+    "triton": "3.8.0",
+    "cuda_build": "13.2",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3070",
+    "gpu_total_bytes": 8589279232,
+    "sm_count": 46,
+    "nsight_systems": true,
+    "nsight_compute": true,
+    "nvidia_smi": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P2",
+      "clocks.sm": "1845",
+      "clocks.mem": "6801",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "45.06",
+      "utilization.gpu": "8"
+    },
+    "compute_apps": {
+      "ok": true,
+      "apps": [
+        "4975, [Not Found], [N/A]"
+      ]
+    },
+    "git": {
+      "ok": true,
+      "sha": "a437d5c3b6b3c1dc90fda8f4bbcb901f5a58e404",
+      "dirty": true
+    }
+  },
+  "nvidia_smi_under_load": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1980",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "150.96",
+    "utilization.gpu": "83"
+  },
+  "nvidia_smi_after": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1935",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "137.41",
+    "utilization.gpu": "99"
+  },
+  "cases": [
+    {
+      "batch": 1,
+      "context": 128,
+      "block_size": 16,
+      "eager": {
+        "wall_ms": 35.70726799989643,
+        "wall_ms_min": 20.297802999266423,
+        "wall_ms_max": 48.985297999024624,
+        "gpu_span_ms": 35.589263916015625,
+        "samples": 20,
+        "tokens_per_s": 28.005502969392687
+      },
+      "fused": {
+        "wall_ms": 21.91914050035848,
+        "wall_ms_min": 15.862211999774445,
+        "wall_ms_max": 36.2961089995224,
+        "gpu_span_ms": 21.78102397918701,
+        "samples": 20,
+        "tokens_per_s": 45.62222683793853
+      },
+      "wall_ratio_eager_over_fused": 1.6290450804543386
+    },
+    {
+      "batch": 8,
+      "context": 128,
+      "block_size": 16,
+      "eager": {
+        "wall_ms": 22.43860099952144,
+        "wall_ms_min": 19.75329699962458,
+        "wall_ms_max": 43.41637500147044,
+        "gpu_span_ms": 21.86627197265625,
+        "samples": 20,
+        "tokens_per_s": 356.52846628765406
+      },
+      "fused": {
+        "wall_ms": 16.156236999449902,
+        "wall_ms_min": 15.592211000694078,
+        "wall_ms_max": 34.91787200073304,
+        "gpu_span_ms": 15.793039798736572,
+        "samples": 20,
+        "tokens_per_s": 495.16480850537096
+      },
+      "wall_ratio_eager_over_fused": 1.3888506958820575
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "block_size": 16,
+      "eager": {
+        "wall_ms": 23.964013500517467,
+        "wall_ms_min": 20.800299000256928,
+        "wall_ms_max": 54.04184400140366,
+        "gpu_span_ms": 23.571295738220215,
+        "samples": 20,
+        "tokens_per_s": 333.8338963891525
+      },
+      "fused": {
+        "wall_ms": 16.56542449927656,
+        "wall_ms_min": 15.974011999787763,
+        "wall_ms_max": 29.89245200114965,
+        "gpu_span_ms": 16.165087699890137,
+        "samples": 20,
+        "tokens_per_s": 482.93359462954743
+      },
+      "wall_ratio_eager_over_fused": 1.446628397694488
+    }
+  ],
+  "launches": {
+    "eager": {
+      "per_step": {
+        "attn": {
+          "launches": 24.0,
+          "busy_ms": 2.0494299999999996
+        },
+        "cache_write": {
+          "launches": 24.0,
+          "busy_ms": 0.0342085
+        },
+        "residual": {
+          "launches": 48.0,
+          "busy_ms": 0.07899199999999998
+        },
+        "rms_norm": {
+          "launches": 49.0,
+          "busy_ms": 0.07590450000000004
+        },
+        "rope": {
+          "launches": 384.0,
+          "busy_ms": 0.7507354999999956
+        },
+        "swiglu": {
+          "launches": 24.0,
+          "busy_ms": 0.05198300000000001
+        },
+        "weight_gemm": {
+          "launches": 169.0,
+          "busy_ms": 9.240445
+        }
+      },
+      "other_launches_per_step": 64.0,
+      "other_busy_ms_per_step": 0.11145400000000001,
+      "total_launches_per_step": 786.0
+    },
+    "fused": {
+      "per_step": {
+        "attn": {
+          "launches": 24.0,
+          "busy_ms": 2.0407005
+        },
+        "cache_write": {
+          "launches": 24.0,
+          "busy_ms": 0.03160099999999999
+        },
+        "residual": {
+          "launches": 48.0,
+          "busy_ms": 0.07748599999999994
+        },
+        "rms_norm": {
+          "launches": 49.0,
+          "busy_ms": 0.07575900000000003
+        },
+        "rope": {
+          "launches": 24.0,
+          "busy_ms": 0.055328000000000016
+        },
+        "swiglu": {
+          "launches": 24.0,
+          "busy_ms": 0.05164549999999999
+        },
+        "weight_gemm": {
+          "launches": 169.0,
+          "busy_ms": 9.235270000000007
+        }
+      },
+      "other_launches_per_step": 64.0,
+      "other_busy_ms_per_step": 0.10924349999999995,
+      "total_launches_per_step": 426.0
+    }
+  },
+  "micro": {
+    "batch": 16,
+    "heads": 32,
+    "time": 512,
+    "dim": 64,
+    "dtype": "bf16",
+    "bytes": 138412032,
+    "eager": {
+      "median_ms": 4.9663816179547995,
+      "min_ms": 4.963104248046875,
+      "max_ms": 4.984068734305246,
+      "iters_per_window": 7,
+      "gbps": 27.869793875606224,
+      "fraction_of_copy": 0.07359871130715978
+    },
+    "fused": {
+      "median_ms": 0.6766166687011719,
+      "min_ms": 0.6753811593783103,
+      "max_ms": 0.6781244439593817,
+      "iters_per_window": 59,
+      "gbps": 204.56491600435243,
+      "fraction_of_copy": 0.5402162019488647
+    }
+  }
+}
