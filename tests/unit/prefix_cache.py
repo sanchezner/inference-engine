@@ -18,6 +18,8 @@ def main():
     _a_hit_admits_on_fewer_fresh_pages()
     _a_partial_tail_is_not_shared()
     _hit_tokens_land_on_the_first_output()
+    _an_empty_pool_refuses()
+    _a_preempted_full_block_is_reused()
 
 
 def _salt_and_chain_change_the_hash():
@@ -159,9 +161,9 @@ def _a_hit_admits_on_fewer_fresh_pages():
     warm.step()
     warm.add_request(Request("b", longer, max_new_tokens=1))
     both = warm.step()
-    assert [out.request_id for out in both] == ["b", "a"]
-    assert both[0].cached_tokens == 8
-    assert both[0].finish_reason == "length"
+    assert [out.request_id for out in both] == ["a", "b"]
+    assert both[1].cached_tokens == 8
+    assert both[1].finish_reason == "length"
     assert warm.stats().requests_waiting == 0
     _pages_engine(warm.pool, warm)
 
@@ -172,7 +174,7 @@ def _a_partial_tail_is_not_shared():
     engine.add_request(Request("a", prompt, max_new_tokens=4))
     engine.add_request(Request("b", prompt, max_new_tokens=4))
     first = engine.step()
-    assert [out.request_id for out in first] == ["a", "b", "a", "b"]
+    assert [out.request_id for out in first] == ["a", "b"]
     assert first[0].cached_tokens == 0
     assert first[1].cached_tokens == 4
     running = {slot.request_id: slot for slot in engine._running}
@@ -208,6 +210,88 @@ def _hit_tokens_land_on_the_first_output():
     assert stats.blocks_free == stats.blocks_total
     assert len(engine.pool.free) < stats.blocks_total
     _pages_engine(engine.pool, engine)
+
+
+def _an_empty_pool_refuses():
+    pool = _pool(1, 4)
+    assert take_page(pool) == 0
+    try:
+        take_page(pool)
+    except RuntimeError as exc:
+        assert "no free page" in str(exc)
+    else:
+        raise AssertionError("an empty pool popped its free list")
+
+
+def _a_preempted_full_block_is_reused():
+    # old and new each need two pages. The spare third page is what old takes, so new's block stays cached.
+    record = {}
+    pool = _pool(3, 4)
+    forwards = _suffix_only(record)
+    engine = _engine(pool, forwards, cache=True, max_batch=2, growth_margin=0)
+    engine.add_request(Request("old", (1,), max_new_tokens=8))
+    engine.add_request(Request("new", (2,), max_new_tokens=8))
+    cached_page = None
+    saw_cached = False
+    saw_repin = False
+    outs = []
+    for _ in range(40):
+        outs.extend(engine.step())
+        _pages_engine(pool, engine)
+        running = {slot.request_id: slot for slot in engine._running}
+        waiting = {item.request.request_id for item in engine._waiting}
+        if "new" in running and running["new"].seq.seq_len >= 4 and cached_page is None:
+            cached_page = running["new"].seq.blocks[0]
+        if cached_page is not None and "new" in waiting:
+            assert pool.cache.holds(cached_page)
+            assert pool.refcount[cached_page] == 0
+            saw_cached = True
+        if saw_cached and "new" in running and running["new"].seq.blocks[0] == cached_page:
+            assert running["new"].seq.seq_len >= 4
+            saw_repin = True
+        stats = engine.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
+    else:
+        raise AssertionError("preempted prefix did not finish")
+    assert saw_cached and saw_repin
+    assert all(out.cached_tokens == 0 for out in outs)
+    roomy = _engine(_pool(8, 4), growth_margin=0, max_batch=2)
+    roomy.add_request(Request("old", (1,), max_new_tokens=8))
+    roomy.add_request(Request("new", (2,), max_new_tokens=8))
+    expected = {}
+    for _ in range(40):
+        for out in roomy.step():
+            if out.token_id is not None:
+                expected.setdefault(out.request_id, []).append(out.token_id)
+        if roomy.stats().requests_running == 0 and roomy.stats().requests_waiting == 0:
+            break
+    got = {}
+    for out in outs:
+        if out.token_id is not None:
+            got.setdefault(out.request_id, []).append(out.token_id)
+    assert got == expected
+    assert engine.stats().blocks_free == engine.stats().blocks_total
+    assert engine.stats().counters.prefix_cache_hit_tokens > 0
+
+
+def _suffix_only(record):
+    def forward_one(ids, seq):
+        n_new = ids.shape[1] - seq.seq_len
+        if n_new <= 0:
+            raise ValueError("paged forward was given no new tokens")
+        _expect(seq, record)
+        row, seq = _write(seq, ids[0, -n_new:].tolist(), record)
+        return row.view(1, -1), seq
+
+    def forward_batch(ids, seqs):
+        rows = []
+        for row, seq in enumerate(seqs):
+            _expect(seq, record)
+            rows.append(_write(seq, [int(ids[row, -1])], record)[0])
+        return torch.stack(rows), seqs
+
+    return forward_one, forward_batch
 
 
 def _checking(record):
@@ -250,14 +334,14 @@ def _write(seq, tokens, record):
     return row, seq
 
 
-def _engine(pool, forwards=None, cache=False, max_batch=2):
+def _engine(pool, forwards=None, cache=False, max_batch=2, growth_margin=1):
     if cache:
         attach_prefix_cache(pool, "m")
     if forwards is None:
         one, batch = _forward_one, _forward_batch
     else:
         one, batch = forwards
-    return EngineCore(one, batch, pool, max_batch)
+    return EngineCore(one, batch, pool, max_batch, growth_margin=growth_margin)
 
 
 def _forward_one(ids, seq):

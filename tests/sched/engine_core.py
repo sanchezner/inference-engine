@@ -25,6 +25,10 @@ def main():
     _idle_stats_echo_the_pool()
     _queue_cap_refuses_the_next_waiter()
     _interleaving_conserves_pages()
+    _margin_one_seats_beside_a_long_budget()
+    _margin_covering_the_budget_holds_the_spare_page()
+    _preemption_matches_a_roomy_run()
+    _a_preempted_request_can_stand_past_the_cap()
 
 
 def _rejects_bad_requests():
@@ -63,6 +67,20 @@ def _rejects_bad_requests():
         assert "Request" in str(exc)
     else:
         raise AssertionError("a non-Request was accepted")
+
+    try:
+        _engine(_pool(1, 4), max_batch=1, growth_margin=-1)
+    except ValueError as exc:
+        assert "growth_margin" in str(exc)
+    else:
+        raise AssertionError("a negative growth margin was accepted")
+
+    try:
+        _engine(_pool(1, 4), max_batch=1, growth_margin=True)
+    except ValueError as exc:
+        assert "growth_margin" in str(exc)
+    else:
+        raise AssertionError("a bool growth margin was accepted")
 
 
 def _length_and_stop_match_the_recurrence():
@@ -107,12 +125,12 @@ def _max_batch_leaves_the_rest_waiting():
     assert stats.pending_prefill_tokens == 10
 
     first = engine.step()
-    assert [out.request_id for out in first] == ["a", "a"]
+    assert [out.request_id for out in first] == ["a"]
     stats = engine.stats()
     assert stats.requests_waiting == 1
     assert stats.requests_running == 1
     assert stats.pending_prefill_tokens == 6
-    assert stats.blocks_free == 16 - 2
+    assert stats.blocks_free == 16 - 1
     _conserved(pool, engine)
 
 
@@ -140,9 +158,9 @@ def _abort_waiting_running_and_unknown():
     assert stats.blocks_free == 8
 
     ran = engine.step()
-    assert [out.request_id for out in ran] == ["queued", "live", "live"]
+    assert [out.request_id for out in ran] == ["queued", "live"]
     assert ran[0].finish_reason == "abort" and ran[0].token_id is None
-    assert engine.stats().counters.tokens_generated == 2
+    assert engine.stats().counters.tokens_generated == 1
     held = engine.stats().blocks_free
     assert held < 8
 
@@ -150,7 +168,7 @@ def _abort_waiting_running_and_unknown():
     assert engine.stats().blocks_free == 8
     assert engine.stats().requests_running == 0
     assert engine.stats().counters.requests_aborted == 2
-    assert engine.stats().counters.tokens_generated == 2
+    assert engine.stats().counters.tokens_generated == 1
     aborted = engine.step()
     assert len(aborted) == 1 and aborted[0].finish_reason == "abort"
     assert engine.stats().counters.requests_finished == 0
@@ -226,10 +244,11 @@ def _reserve_max_keeps_growth_pages():
     engine.add_request(Request("grow", (1, 1, 1, 1), max_new_tokens=5))
     engine.add_request(Request("hold", (2,), max_new_tokens=4))
     first = engine.step()
-    assert [(out.request_id, out.token_id) for out in first] == [("grow", 2), ("grow", 3)]
+    assert [(out.request_id, out.token_id) for out in first] == [("grow", 2)]
     assert engine.stats().requests_waiting == 1
     assert engine.stats().requests_running == 1
-    assert engine.stats().blocks_free == 0
+    # grow still needs its second page, and that page is the margin, so hold waits.
+    assert engine.stats().blocks_free == 1
     outs = first + _collect(engine)
     assert [(out.request_id, out.token_id, out.finish_reason) for out in outs] == [
         ("grow", 2, None),
@@ -253,11 +272,11 @@ def _oldest_waiter_blocks_a_smaller_one():
     engine.add_request(Request("wide", (2, 2, 2, 2, 2), max_new_tokens=5))
     engine.add_request(Request("thin", (3,), max_new_tokens=1))
     first = engine.step()
-    assert [out.request_id for out in first] == ["anchor", "anchor"]
+    assert [out.request_id for out in first] == ["anchor"]
     stats = engine.stats()
     assert stats.requests_waiting == 2
     assert stats.requests_running == 1
-    assert stats.blocks_free == 1
+    assert stats.blocks_free == 2
     outs = first + _collect(engine)
     assert [out.request_id for out in outs] == ["anchor"] * 5 + ["wide"] * 5 + ["thin"]
     assert [(out.token_id, out.finish_reason) for out in outs if out.request_id == "thin"] == [(4, "length")]
@@ -354,8 +373,9 @@ def _one_interleaving(seed):
             try:
                 engine.add_request(req)
             except QueueFull as exc:
-                assert exc.waiting == engine.max_waiting
-                assert engine.stats().requests_waiting == engine.max_waiting
+                # A preempted request already has a seat, so the line can stand past the cap.
+                assert exc.waiting >= engine.max_waiting
+                assert engine.stats().requests_waiting == exc.waiting
             else:
                 accepted.append(rid)
         elif roll == 1:
@@ -379,6 +399,134 @@ def _one_interleaving(seed):
     _conserved(pool, engine)
 
 
+def _margin_one_seats_beside_a_long_budget():
+    # grow ends on 3 pages but holds 1 after its prefill. One spare page seats hold now.
+    reqs = [
+        Request("grow", (1,), max_new_tokens=12),
+        Request("hold", (2,), max_new_tokens=1),
+    ]
+    roomy = _run(reqs, pages=8, margin=1)
+    tight = _engine(_pool(4, 4), max_batch=2, growth_margin=1)
+    for req in reqs:
+        tight.add_request(req)
+    first = tight.step()
+    assert [out.request_id for out in first] == ["grow", "hold"]
+    assert first[1].finish_reason == "length"
+    got = _group(first)
+    for rid, pairs in _drain(tight).items():
+        got.setdefault(rid, []).extend(pairs)
+    assert got == roomy
+    assert tight.stats().blocks_free == tight.stats().blocks_total
+
+
+def _margin_covering_the_budget_holds_the_spare_page():
+    # Same pair. A margin that covers grow's whole budget keeps hold waiting while a page is free.
+    pool = _pool(3, 4)
+    engine = _engine(pool, max_batch=2, growth_margin=8)
+    engine.add_request(Request("grow", (1,), max_new_tokens=12))
+    engine.add_request(Request("hold", (2,), max_new_tokens=1))
+    first = engine.step()
+    assert [out.request_id for out in first] == ["grow"]
+    stats = engine.stats()
+    assert stats.requests_waiting == 1 and stats.requests_running == 1
+    assert stats.blocks_free >= 1
+    assert _drain(engine)["hold"] == [(3, "length")]
+    assert engine.stats().blocks_free == 3
+    _conserved(pool, engine)
+
+
+def _preemption_matches_a_roomy_run():
+    reqs = [
+        Request("old", (1,), max_new_tokens=8),
+        Request("new", (2,), max_new_tokens=5),
+    ]
+    roomy = _run(reqs, pages=8, margin=0)
+    tight = _engine(_pool(2, 4), max_batch=2, growth_margin=0)
+    for req in reqs:
+        tight.add_request(req)
+    saw_new_waiting = False
+    grouped = {}
+    for _ in range(32):
+        if grouped.get("new") and any(item.request.request_id == "new" for item in tight._waiting):
+            assert any(slot.request_id == "old" for slot in tight._running)
+            saw_new_waiting = True
+        outs = tight.step()
+        for out in outs:
+            grouped.setdefault(out.request_id, []).append((out.token_id, out.finish_reason))
+        _conserved(tight.pool, tight)
+        stats = tight.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
+    else:
+        raise AssertionError("tight engine did not finish")
+    assert saw_new_waiting
+    assert grouped == roomy
+    assert tight.stats().blocks_free == tight.stats().blocks_total
+
+    # Aborting the preempted request still gives its pages back, and old's tokens stay the same.
+    again = _engine(_pool(2, 4), max_batch=2, growth_margin=0)
+    for req in reqs:
+        again.add_request(req)
+    aborted = False
+    old_tokens = []
+    for _ in range(32):
+        if any(item.request.request_id == "new" for item in again._waiting) and old_tokens:
+            again.abort("new")
+            aborted = True
+        outs = again.step()
+        for out in outs:
+            if out.request_id == "old" and out.token_id is not None:
+                old_tokens.append(out.token_id)
+        _conserved(again.pool, again)
+        stats = again.stats()
+        if aborted and stats.requests_waiting == 0 and stats.requests_running == 0:
+            break
+    else:
+        raise AssertionError("aborted engine did not finish")
+    assert aborted
+    assert [token for token, _reason in roomy["old"]] == old_tokens
+    assert again.stats().counters.requests_aborted == 1
+    assert again.stats().blocks_free == again.stats().blocks_total
+
+
+def _a_preempted_request_can_stand_past_the_cap():
+    pool = _pool(2, 4)
+    engine = _engine(pool, max_batch=2, max_waiting=1, growth_margin=0)
+    engine.add_request(Request("old", (1,), max_new_tokens=8))
+    engine.step()
+    engine.add_request(Request("new", (2,), max_new_tokens=5))
+    engine.step()
+    assert engine.stats().requests_running == 2
+    engine.add_request(Request("third", (3,), max_new_tokens=1))
+    assert engine.stats().requests_waiting == 1
+    for _ in range(16):
+        engine.step()
+        _conserved(pool, engine)
+        if engine.stats().requests_waiting > engine.max_waiting:
+            break
+    else:
+        raise AssertionError("preemption did not stand past the waiting cap")
+    try:
+        engine.add_request(Request("nope", (4,), max_new_tokens=1))
+    except QueueFull as exc:
+        assert exc.waiting > exc.max_waiting
+    else:
+        raise AssertionError("a line past the cap accepted another waiter")
+    for rid in ("old", "new", "third"):
+        engine.abort(rid)
+    assert engine.step()
+    assert engine.stats().requests_waiting == 0 and engine.stats().requests_running == 0
+    assert engine.stats().blocks_free == 2
+    _conserved(pool, engine)
+
+
+def _run(reqs, pages, margin):
+    engine = _engine(_pool(pages, 4), max_batch=4, growth_margin=margin)
+    for req in reqs:
+        engine.add_request(req)
+    return _drain(engine)
+
+
 class _Clock:
     def __init__(self):
         self.t = 0.0
@@ -388,8 +536,11 @@ class _Clock:
         return self.t
 
 
-def _engine(pool, max_batch, clock=None, max_waiting=256):
-    return EngineCore(_forward_one, _forward_batch, pool, max_batch, clock=clock, max_waiting=max_waiting)
+def _engine(pool, max_batch, clock=None, max_waiting=256, growth_margin=1):
+    return EngineCore(
+        _forward_one, _forward_batch, pool, max_batch,
+        clock=clock, max_waiting=max_waiting, growth_margin=growth_margin,
+    )
 
 
 def _pool(n_pages, block_size):
@@ -433,6 +584,13 @@ def _expect(prompt, budget, stop=()):
         if last in stop:
             break
     return tokens
+
+
+def _group(outs):
+    grouped = {}
+    for out in outs:
+        grouped.setdefault(out.request_id, []).append((out.token_id, out.finish_reason))
+    return grouped
 
 
 def _collect(engine):

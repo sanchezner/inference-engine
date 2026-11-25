@@ -109,11 +109,10 @@ def take_page(pool: PagePool) -> int:
         cache = pool.cache
         evicted = None if cache is None else cache.evict()
         if evicted is None:
-            pool.free.pop(0)
-        else:
-            if pool.refcount[evicted] != 0:
-                raise RuntimeError(f"evicted page {evicted} still has refcount {pool.refcount[evicted]}")
-            pool.free.append(evicted)
+            raise RuntimeError("page pool has no free page and no evictable prefix block")
+        if pool.refcount[evicted] != 0:
+            raise RuntimeError(f"evicted page {evicted} still has refcount {pool.refcount[evicted]}")
+        pool.free.append(evicted)
     page = pool.free.pop(0)
     if pool.refcount[page] != 0:
         raise RuntimeError(f"free page {page} has refcount {pool.refcount[page]}")
