@@ -3,13 +3,14 @@ export PYTHONPATH := .
 export HF_HUB_DISABLE_PROGRESS_BARS := 1
 export TQDM_DISABLE := 1
 
-.PHONY: check bringup bench-bandwidth bench-profile bench-baseline bench-paged bench-prefix bench-fusion bench-chunked
+.PHONY: check bringup bench-bandwidth bench-profile bench-baseline bench-paged bench-prefix bench-fusion bench-chunked bench-graph
 
 check:
 	$(PY) tests/unit/paged_attn.py
 	$(PY) tests/unit/reshape_cache.py
 	$(PY) tests/unit/rmsnorm.py
 	$(PY) tests/unit/rope.py
+	$(PY) tests/unit/decode_graph.py
 	$(PY) tests/unit/prefix_cache.py
 	$(PY) tests/sched/sampling.py
 	$(PY) tests/sched/engine_core.py
@@ -48,3 +49,6 @@ bench-fusion:
 
 bench-chunked:
 	$(PY) bench/e2e/chunked.py
+
+bench-graph:
+	$(PY) bench/graph.py

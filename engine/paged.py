@@ -158,7 +158,7 @@ def page_gather(seq: Sequence, layer: int, n: int):
     return k, v
 
 
-def forward_paged(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seq: Sequence):
+def forward_paged(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seq: Sequence, *, graphs=None):
     if ids.ndim != 2 or ids.shape[0] != 1:
         raise ValueError(f"paged forward takes one sequence [1, time], got {tuple(ids.shape)}")
     _same_device(weights, seq.pool)
@@ -168,8 +168,14 @@ def forward_paged(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, s
     new_ids = ids[:, past:]
     if new_ids.shape[1] == 0:
         raise ValueError("paged forward was given no new tokens")
-    x = weights.embed[new_ids]
     T_new = new_ids.shape[1]
+    # Off unless the caller passes one, so the token checks stay on the eager path below.
+    if graphs is not None and _use_decode_kernel(weights, cfg, seq.pool, T_new):
+        ran = graphs.try_decode(weights, cfg, rope, new_ids, [seq])
+        if ran is not None:
+            logits, _seqs = ran
+            return logits, seq
+    x = weights.embed[new_ids]
     pos = torch.arange(past, past + T_new, device=device).unsqueeze(0)
     cos, sin = rope.gather(pos)
     if _use_decode_kernel(weights, cfg, seq.pool, T_new):
@@ -195,7 +201,9 @@ def gather_padded(seqs: list[Sequence], layer: int, lens: list[int], width: int)
     return torch.cat(ks, dim=0), torch.cat(vs, dim=0)
 
 
-def forward_paged_batch(weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seqs: list[Sequence]):
+def forward_paged_batch(
+    weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seqs: list[Sequence], *, graphs=None,
+):
     # One new token on CUDA reads each sequence's own length.
     # A fresh batch uses SDPA. A batch that already has pages still left-pads.
     if ids.ndim != 2:
@@ -210,6 +218,10 @@ def forward_paged_batch(weights: Weights, cfg: ModelConfig, rope, ids: torch.Ten
     ids = ids.to(device=device)
     lens = [seq.seq_len for seq in seqs]
     T_new = ids.shape[1]
+    if graphs is not None and _use_decode_kernel(weights, cfg, seqs[0].pool, T_new):
+        ran = graphs.try_decode(weights, cfg, rope, ids, seqs)
+        if ran is not None:
+            return ran
     x = weights.embed[ids]
     pos = torch.tensor(lens, device=device).unsqueeze(1) + torch.arange(T_new, device=device)
     cos, sin = rope.gather(pos)
@@ -229,6 +241,13 @@ def _use_decode_kernel(weights: Weights, cfg: ModelConfig, pool: PagePool, t_new
 
 def _decode_layers(weights, cfg, x, seqs, lens, cos, sin):
     # The attention kernel only reads the pool, so the new token is scattered in before the launch.
+    _pool, tables, seq_lens, slots = _prepare_decode(seqs, lens, x.device)
+    x = _decode_math(weights, cfg, x, seqs, lens, tables, seq_lens, slots, cos, sin)
+    _advance(seqs, lens)
+    return x
+
+
+def _prepare_decode(seqs, lens, device, *, check=True):
     pool = seqs[0].pool
     for seq in seqs[1:]:
         if seq.pool is not pool:
@@ -236,14 +255,24 @@ def _decode_layers(weights, cfg, x, seqs, lens, cos, sin):
     for seq, n in zip(seqs, lens):
         reserve_pages(seq, n + 1)
     lengths = [n + 1 for n in lens]
-    tables = _block_tables(seqs, x.device)
+    tables = _block_tables(seqs, device)
     width = tables.shape[1]
     for n in lengths:
         if n < 1 or (n + pool.block_size - 1) // pool.block_size > width:
             raise ValueError("each seq_len must be >= 1 and fit in block_tables")
-    seq_lens = torch.tensor(lengths, device=x.device, dtype=torch.int32)
-    # Pages stay put for the whole step, so one slot map serves every layer.
-    slots = _slots_for(pool, tables, lens, 1)
+    seq_lens = _stage(torch.tensor(lengths, dtype=torch.int32), device)
+    # The graph path skips the slot readback. Its replay cannot stop for a host check.
+    if check:
+        slots = _slots_for(pool, tables, lens, 1)
+    elif cache_supported(device, pool.k.dtype, pool.k.shape[-1], pool.block_size):
+        slots = _slots_from_table(tables, lens, 1, pool.block_size)
+    else:
+        slots = None
+    return pool, tables, seq_lens, slots
+
+
+def _decode_math(weights, cfg, x, seqs, lens, tables, seq_lens, slots, cos, sin):
+    pool = seqs[0].pool
     for i, layer in enumerate(weights.layers):
         h = rms_norm(x, layer.input_norm, cfg.rms_norm_eps)
         q, k_new, v_new = project_qkv(h, layer, cfg, cos, sin)
@@ -252,9 +281,12 @@ def _decode_layers(weights, cfg, x, seqs, lens, cos, sin):
         x = x + merge_heads(attn.unsqueeze(2), layer)
         h = rms_norm(x, layer.post_norm, cfg.rms_norm_eps)
         x = x + mlp(h, layer)
+    return x
+
+
+def _advance(seqs, lens) -> None:
     for seq, n in zip(seqs, lens):
         seq.seq_len = n + 1
-    return x
 
 
 def _prefill_layers(weights, cfg, x, seqs, cos, sin):
@@ -337,19 +369,27 @@ def _slots_for(pool, tables, starts, t_new):
 
 def _slots_from_table(tables, starts, t_new, block_size):
     # The kernel splits this int32 back into a page and an offset by dividing by block_size.
-    pos = torch.tensor(starts, device=tables.device, dtype=torch.int64)[:, None]
-    pos = pos + torch.arange(t_new, device=tables.device)
+    pos = _stage(torch.tensor(starts, dtype=torch.int64), tables.device)[:, None]
+    pos = pos + torch.arange(t_new, device=pos.device)
     page = tables.gather(1, pos // block_size)
     return page * block_size + (pos % block_size).to(dtype=torch.int32)
 
 
 def _block_tables(seqs, device):
     width = max(len(seq.blocks) for seq in seqs)
-    table = torch.zeros(len(seqs), width, device=device, dtype=torch.int32)
+    table = torch.zeros(len(seqs), width, dtype=torch.int32)
     for row, seq in enumerate(seqs):
         if seq.blocks:
-            table[row, :len(seq.blocks)] = torch.tensor(seq.blocks, dtype=torch.int32, device=device)
-    return table
+            table[row, :len(seq.blocks)] = torch.tensor(seq.blocks, dtype=torch.int32)
+    return _stage(table, device)
+
+
+def _stage(cpu, device):
+    # One upload. A row-by-row device copy would sync once per sequence.
+    device = torch.device(device)
+    if device.type != "cuda":
+        return cpu.to(device)
+    return cpu.pin_memory().to(device, non_blocking=True)
 
 
 def _logits(weights, cfg, x):

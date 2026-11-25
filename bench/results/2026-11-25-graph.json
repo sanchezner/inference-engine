@@ -1,0 +1,221 @@
+{
+  "part": "decode-graph",
+  "date": "2026-11-25",
+  "host": "WSL2",
+  "command": "make bench-graph",
+  "methodology": "SmolLM2-1.7B, CUDA bf16, block size 16, WSL2, clocks not locked. A decode step is one new token per sequence. Each sequence is prefilled once; timed steps rewind seq_len so every step sees the same context and overwrites the same KV slot. eager_item is forward_paged_batch, argmax, then one .item() per sequence, which is the sync the profile measured. eager_once is the same forward with one .tolist() for the whole batch. graph is DecodeGraphs around that forward, same one .tolist(). The three modes alternate step by step after five warmup steps of each, so the capture is not in the samples. Ten samples, median wall from perf_counter after a sync, and the CUDA-event span of the forward. Tokens/s is batch / median wall seconds. The ceiling is decode_step_bytes at the longest prefill length over the median copy in bench/results/2026-10-31-bandwidth.json, the same denominator as the paged-decode step table. The trace is one sample of batch 8, context 512, after warmup, and it includes the harness sync that brackets the sample. Kernel events are the launches the profiler sees, including the kernels inside one graph replay. Syncs are CPU ops whose name contains item, tolist, or synchronize. The graph path's own device-to-host copy is the one pageable transfer from the token list; the device sync and the event sync are the timer. A batch that is not 1, 2, 4, 8, 16, or 32 does not take this path. Host is WSL2.",
+  "model": "HuggingFaceTB/SmolLM2-1.7B",
+  "dtype": "bfloat16",
+  "block_size": 16,
+  "bandwidth_source": "bench/results/2026-10-31-bandwidth.json",
+  "bandwidth_median_bytes_per_s": 378672307987.7489,
+  "environment": {
+    "host": "WSL2",
+    "python": "3.14.4",
+    "torch": "2.14.1+cu132",
+    "triton": "3.8.0",
+    "cuda_build": "13.2",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3070",
+    "gpu_total_bytes": 8589279232,
+    "sm_count": 46,
+    "nsight_systems": true,
+    "nsight_compute": true,
+    "nvidia_smi": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P2",
+      "clocks.sm": "1890",
+      "clocks.mem": "6801",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "42.21",
+      "utilization.gpu": "21"
+    },
+    "compute_apps": {
+      "ok": true,
+      "apps": [
+        "25018, [Not Found], [N/A]"
+      ]
+    },
+    "git": {
+      "ok": true,
+      "sha": "e04e020eb16301bd700da10018a2c02b16eb88c3",
+      "dirty": true
+    }
+  },
+  "nvidia_smi_under_load": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1995",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "164.62",
+    "utilization.gpu": "98"
+  },
+  "nvidia_smi_after": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1995",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "157.52",
+    "utilization.gpu": "21"
+  },
+  "cases": [
+    {
+      "batch": 1,
+      "context": 128,
+      "ceiling_tokens_per_s": 109.82621777038781,
+      "modes": {
+        "eager_item": {
+          "wall_ms": 18.23880400024791,
+          "wall_ms_min": 16.80051299990737,
+          "wall_ms_max": 37.97285500149883,
+          "gpu_span_ms": 18.1079683303833,
+          "samples": 10,
+          "tokens_per_s": 54.828156494603896
+        },
+        "eager_once": {
+          "wall_ms": 17.876949500532646,
+          "wall_ms_min": 16.888006000954192,
+          "wall_ms_max": 26.553198000328848,
+          "gpu_span_ms": 17.765024185180664,
+          "samples": 10,
+          "tokens_per_s": 55.93795518470334
+        },
+        "graph": {
+          "wall_ms": 10.244060499644547,
+          "wall_ms_min": 10.124335000000428,
+          "wall_ms_max": 11.117007001303136,
+          "gpu_span_ms": 10.136576175689697,
+          "samples": 10,
+          "tokens_per_s": 97.6175414070132
+        }
+      },
+      "graph_fraction_of_ceiling": 0.8888364125504247,
+      "eager_item_fraction_of_ceiling": 0.49922648350899584,
+      "wall_ratio_item_over_graph": 1.7804272047085985
+    },
+    {
+      "batch": 8,
+      "context": 128,
+      "ceiling_tokens_per_s": 835.8953467518076,
+      "modes": {
+        "eager_item": {
+          "wall_ms": 17.442203999962658,
+          "wall_ms_min": 16.477279999890015,
+          "wall_ms_max": 22.702723001202685,
+          "gpu_span_ms": 16.96614360809326,
+          "samples": 10,
+          "tokens_per_s": 458.6576329469101
+        },
+        "eager_once": {
+          "wall_ms": 16.821032500047295,
+          "wall_ms_min": 15.7696610003768,
+          "wall_ms_max": 32.196919000853086,
+          "gpu_span_ms": 16.70809555053711,
+          "samples": 10,
+          "tokens_per_s": 475.5950623112765
+        },
+        "graph": {
+          "wall_ms": 11.217118499189382,
+          "wall_ms_min": 10.813852999490337,
+          "wall_ms_max": 12.093547000404214,
+          "gpu_span_ms": 11.058303833007812,
+          "samples": 10,
+          "tokens_per_s": 713.1956393772722
+        }
+      },
+      "graph_fraction_of_ceiling": 0.853211639649231,
+      "eager_item_fraction_of_ceiling": 0.548702220594002,
+      "wall_ratio_item_over_graph": 1.5549629792377728
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "ceiling_tokens_per_s": 716.4883197160492,
+      "modes": {
+        "eager_item": {
+          "wall_ms": 17.52940549977211,
+          "wall_ms_min": 16.09769300011976,
+          "wall_ms_max": 31.123778000619495,
+          "gpu_span_ms": 17.073887825012207,
+          "samples": 10,
+          "tokens_per_s": 456.3760020329271
+        },
+        "eager_once": {
+          "wall_ms": 18.05201200022566,
+          "wall_ms_min": 16.009106999263167,
+          "wall_ms_max": 34.367131998806144,
+          "gpu_span_ms": 17.946975708007812,
+          "samples": 10,
+          "tokens_per_s": 443.1638977361635
+        },
+        "graph": {
+          "wall_ms": 12.865361999502056,
+          "wall_ms_min": 12.119054999857326,
+          "wall_ms_max": 13.199267999880249,
+          "gpu_span_ms": 12.714303970336914,
+          "samples": 10,
+          "tokens_per_s": 621.8247104364132
+        }
+      },
+      "graph_fraction_of_ceiling": 0.867878363575903,
+      "eager_item_fraction_of_ceiling": 0.6369622357748874,
+      "wall_ratio_item_over_graph": 1.3625271873772826
+    }
+  ],
+  "trace": {
+    "eager_item": {
+      "kernel_launches": 405,
+      "syncs": {
+        "aten::item": 9,
+        "cudaDeviceSynchronize": 2,
+        "cudaEventSynchronize": 1,
+        "cudaStreamSynchronize": 10
+      },
+      "device_to_host": {
+        "Memcpy DtoH (Device -> Pinned)": 9
+      },
+      "categories": {
+        "Trace": 1,
+        "cpu_op": 2513,
+        "cuda_driver": 121,
+        "cuda_runtime": 412,
+        "gpu_memcpy": 13,
+        "kernel": 405,
+        "overhead": 1
+      }
+    },
+    "graph": {
+      "kernel_launches": 399,
+      "syncs": {
+        "cudaDeviceSynchronize": 2,
+        "cudaEventSynchronize": 1,
+        "cudaStreamSynchronize": 1
+      },
+      "device_to_host": {
+        "Memcpy DtoH (Device -> Pageable)": 1
+      },
+      "categories": {
+        "Trace": 1,
+        "cpu_op": 161,
+        "cuda_runtime": 55,
+        "gpu_memcpy": 11,
+        "kernel": 399,
+        "overhead": 1
+      }
+    }
+  }
+}
