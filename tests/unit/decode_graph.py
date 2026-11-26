@@ -1,7 +1,7 @@
 import torch
 
 from engine.config import ModelConfig
-from engine.decode_graph import DecodeGraphs, greedy_tokens
+from engine.decode_graph import DecodeGraphs, _table_bucket, greedy_tokens
 from engine.model import RopeTables
 from engine.paged import forward_paged, forward_paged_batch, new_page_pool, new_sequence
 from engine.weights import LayerWeights, Weights
@@ -13,10 +13,12 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.manual_seed(0)
+    _table_buckets_stop_at_the_pool()
     _a_bucket_matches_eager()
     _a_second_step_reuses_the_graph()
     _one_sequence_matches_eager()
     _an_odd_batch_stays_eager()
+    _crossing_pages_uses_one_graph_per_bucket()
     _greedy_tokens_are_one_list()
 
 
@@ -81,6 +83,45 @@ def _an_odd_batch_stays_eager():
     got, _state = _step(weights, cfg, rope, seqs, runner)
     assert runner._graphs == {}
     assert torch.equal(got, eager)
+
+
+def _table_buckets_stop_at_the_pool():
+    assert _table_bucket(1, 10) == 1
+    assert _table_bucket(2, 10) == 2
+    assert _table_bucket(3, 10) == 4
+    assert _table_bucket(5, 10) == 8
+    assert _table_bucket(9, 10) == 10
+    assert _table_bucket(8, 8) == 8
+    assert _table_bucket(1, 1) == 1
+
+
+def _crossing_pages_uses_one_graph_per_bucket():
+    # Block 16. Lengths 16, 32, 48, and 64 are four pages and three width buckets: 1, 2, and 4.
+    cfg, weights, rope = _model(torch.float32, seed=12)
+    _walk_across_pages(cfg, weights, rope, (15,), 64, {1, 2, 4}, seed=13)
+    _walk_across_pages(cfg, weights, rope, (30, 4), 64, {2, 4}, seed=14)
+
+
+def _walk_across_pages(cfg, weights, rope, lengths, stop, buckets, seed):
+    seqs = _prefill(cfg, weights, rope, lengths, seed)
+    runner = DecodeGraphs()
+    seen = None
+    while seqs[0].seq_len < stop:
+        snap = _snapshot(seqs)
+        eager, eager_state = _step(weights, cfg, rope, seqs, None)
+        _restore(seqs, snap)
+        got, got_state = _step(weights, cfg, rope, seqs, runner)
+        _close(got, eager, 1e-5, f"crossing {lengths} at {seqs[0].seq_len}")
+        _close(got_state["k"], eager_state["k"], 1e-5, f"crossing k {lengths}")
+        widths = {key[3] for key in runner._graphs}
+        assert widths <= buckets
+        assert len(runner._graphs) == len(widths)
+        if max(len(seq.blocks) for seq in seqs) >= 3 and seen is None:
+            seen = len(runner._graphs)
+        elif seen is not None:
+            assert len(runner._graphs) == seen
+    assert {key[3] for key in runner._graphs} == buckets
+    assert seen is not None
 
 
 def _greedy_tokens_are_one_list():

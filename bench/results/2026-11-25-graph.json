@@ -3,7 +3,7 @@
   "date": "2026-11-25",
   "host": "WSL2",
   "command": "make bench-graph",
-  "methodology": "SmolLM2-1.7B, CUDA bf16, block size 16, WSL2, clocks not locked. A decode step is one new token per sequence. Each sequence is prefilled once; timed steps rewind seq_len so every step sees the same context and overwrites the same KV slot. eager_item is forward_paged_batch, argmax, then one .item() per sequence, which is the sync the profile measured. eager_once is the same forward with one .tolist() for the whole batch. graph is DecodeGraphs around that forward, same one .tolist(). The three modes alternate step by step after five warmup steps of each, so the capture is not in the samples. Ten samples, median wall from perf_counter after a sync, and the CUDA-event span of the forward. Tokens/s is batch / median wall seconds. The ceiling is decode_step_bytes at the longest prefill length over the median copy in bench/results/2026-10-31-bandwidth.json, the same denominator as the paged-decode step table. The trace is one sample of batch 8, context 512, after warmup, and it includes the harness sync that brackets the sample. Kernel events are the launches the profiler sees, including the kernels inside one graph replay. Syncs are CPU ops whose name contains item, tolist, or synchronize. The graph path's own device-to-host copy is the one pageable transfer from the token list; the device sync and the event sync are the timer. A batch that is not 1, 2, 4, 8, 16, or 32 does not take this path. Host is WSL2.",
+  "methodology": "SmolLM2-1.7B, CUDA bf16, block size 16, WSL2, clocks not locked. A decode step is one new token per sequence. Each sequence is prefilled once; timed steps rewind seq_len so every step sees the same context and overwrites the same KV slot. eager_item is forward_paged_batch, argmax, then one .item() per sequence, which is the sync the profile measured. eager_once is the same forward with one .tolist() for the whole batch. graph is DecodeGraphs around that forward, same one .tolist(). The three modes alternate step by step after five warmup steps of each, so the capture is not in the samples. Ten samples, median wall from perf_counter after a sync, and the CUDA-event span of the forward. Tokens/s is batch / median wall seconds. The ceiling is decode_step_bytes at the longest prefill length over the median copy in bench/results/2026-10-31-bandwidth.json, the same denominator as the paged-decode step table. The trace is one sample of batch 8, context 512, after warmup, and it includes the harness sync that brackets the sample. Kernel events are the launches the profiler sees, including the kernels inside one graph replay. Syncs are CPU ops whose name contains item, tolist, or synchronize. The graph path's own device-to-host copy is the one pageable transfer from the token list; the device sync and the event sync are the timer. A batch that is not 1, 2, 4, 8, 16, or 32 does not take this path. A second run prefills one sequence to 17 tokens and decodes it to 128 without rewinding seq_len, so the block table crosses a page boundary every 16 tokens. Capture count is how many graphs that run created. Capture time is the wall of a step that created one, including its three warmups. Step time is the median wall of the other steps. Host is WSL2.",
   "model": "HuggingFaceTB/SmolLM2-1.7B",
   "dtype": "bfloat16",
   "block_size": 16,
@@ -27,22 +27,22 @@
       "driver_version": "610.88",
       "memory.total": "8192",
       "pstate": "P2",
-      "clocks.sm": "1890",
+      "clocks.sm": "1935",
       "clocks.mem": "6801",
       "clocks.max.sm": "2130",
       "clocks.max.mem": "7001",
-      "power.draw": "42.21",
-      "utilization.gpu": "21"
+      "power.draw": "41.63",
+      "utilization.gpu": "13"
     },
     "compute_apps": {
       "ok": true,
       "apps": [
-        "25018, [Not Found], [N/A]"
+        "40601, [Not Found], [N/A]"
       ]
     },
     "git": {
       "ok": true,
-      "sha": "e04e020eb16301bd700da10018a2c02b16eb88c3",
+      "sha": "27d8616ed6f77bfd9de63dbc076f8a7c99d78091",
       "dirty": true
     }
   },
@@ -56,8 +56,8 @@
     "clocks.mem": "6801",
     "clocks.max.sm": "2130",
     "clocks.max.mem": "7001",
-    "power.draw": "164.62",
-    "utilization.gpu": "98"
+    "power.draw": "166.66",
+    "utilization.gpu": "96"
   },
   "nvidia_smi_after": {
     "ok": true,
@@ -65,12 +65,12 @@
     "driver_version": "610.88",
     "memory.total": "8192",
     "pstate": "P2",
-    "clocks.sm": "1995",
+    "clocks.sm": "1980",
     "clocks.mem": "6801",
     "clocks.max.sm": "2130",
     "clocks.max.mem": "7001",
-    "power.draw": "157.52",
-    "utilization.gpu": "21"
+    "power.draw": "157.58",
+    "utilization.gpu": "89"
   },
   "cases": [
     {
@@ -79,33 +79,33 @@
       "ceiling_tokens_per_s": 109.82621777038781,
       "modes": {
         "eager_item": {
-          "wall_ms": 18.23880400024791,
-          "wall_ms_min": 16.80051299990737,
-          "wall_ms_max": 37.97285500149883,
-          "gpu_span_ms": 18.1079683303833,
+          "wall_ms": 23.847374999604654,
+          "wall_ms_min": 17.082164999010274,
+          "wall_ms_max": 38.11711899834336,
+          "gpu_span_ms": 23.738847732543945,
           "samples": 10,
-          "tokens_per_s": 54.828156494603896
+          "tokens_per_s": 41.933336479028746
         },
         "eager_once": {
-          "wall_ms": 17.876949500532646,
-          "wall_ms_min": 16.888006000954192,
-          "wall_ms_max": 26.553198000328848,
-          "gpu_span_ms": 17.765024185180664,
+          "wall_ms": 21.48597650011652,
+          "wall_ms_min": 16.761692997533828,
+          "wall_ms_max": 39.1600010007096,
+          "gpu_span_ms": 21.38596820831299,
           "samples": 10,
-          "tokens_per_s": 55.93795518470334
+          "tokens_per_s": 46.54198518715577
         },
         "graph": {
-          "wall_ms": 10.244060499644547,
-          "wall_ms_min": 10.124335000000428,
-          "wall_ms_max": 11.117007001303136,
-          "gpu_span_ms": 10.136576175689697,
+          "wall_ms": 10.394467499281745,
+          "wall_ms_min": 10.101118998136371,
+          "wall_ms_max": 11.106556001323042,
+          "gpu_span_ms": 10.289103984832764,
           "samples": 10,
-          "tokens_per_s": 97.6175414070132
+          "tokens_per_s": 96.20502445835727
         }
       },
-      "graph_fraction_of_ceiling": 0.8888364125504247,
-      "eager_item_fraction_of_ceiling": 0.49922648350899584,
-      "wall_ratio_item_over_graph": 1.7804272047085985
+      "graph_fraction_of_ceiling": 0.8759750304748891,
+      "eager_item_fraction_of_ceiling": 0.3818153563905679,
+      "wall_ratio_item_over_graph": 2.2942372951045833
     },
     {
       "batch": 8,
@@ -113,33 +113,33 @@
       "ceiling_tokens_per_s": 835.8953467518076,
       "modes": {
         "eager_item": {
-          "wall_ms": 17.442203999962658,
-          "wall_ms_min": 16.477279999890015,
-          "wall_ms_max": 22.702723001202685,
-          "gpu_span_ms": 16.96614360809326,
+          "wall_ms": 16.556760998355458,
+          "wall_ms_min": 16.24370400168118,
+          "wall_ms_max": 69.16581200130167,
+          "gpu_span_ms": 16.15894317626953,
           "samples": 10,
-          "tokens_per_s": 458.6576329469101
+          "tokens_per_s": 483.186294758656
         },
         "eager_once": {
-          "wall_ms": 16.821032500047295,
-          "wall_ms_min": 15.7696610003768,
-          "wall_ms_max": 32.196919000853086,
-          "gpu_span_ms": 16.70809555053711,
+          "wall_ms": 16.00860050166375,
+          "wall_ms_min": 15.809644999535521,
+          "wall_ms_max": 27.286755001114216,
+          "gpu_span_ms": 15.913680076599121,
           "samples": 10,
-          "tokens_per_s": 475.5950623112765
+          "tokens_per_s": 499.7313787153706
         },
         "graph": {
-          "wall_ms": 11.217118499189382,
-          "wall_ms_min": 10.813852999490337,
-          "wall_ms_max": 12.093547000404214,
-          "gpu_span_ms": 11.058303833007812,
+          "wall_ms": 10.991331499099033,
+          "wall_ms_min": 10.740470999735408,
+          "wall_ms_max": 11.32106300065061,
+          "gpu_span_ms": 10.882400035858154,
           "samples": 10,
-          "tokens_per_s": 713.1956393772722
+          "tokens_per_s": 727.8463033032682
         }
       },
-      "graph_fraction_of_ceiling": 0.853211639649231,
-      "eager_item_fraction_of_ceiling": 0.548702220594002,
-      "wall_ratio_item_over_graph": 1.5549629792377728
+      "graph_fraction_of_ceiling": 0.8707385513409001,
+      "eager_item_fraction_of_ceiling": 0.5780463985548693,
+      "wall_ratio_item_over_graph": 1.5063471609160934
     },
     {
       "batch": 8,
@@ -147,33 +147,33 @@
       "ceiling_tokens_per_s": 716.4883197160492,
       "modes": {
         "eager_item": {
-          "wall_ms": 17.52940549977211,
-          "wall_ms_min": 16.09769300011976,
-          "wall_ms_max": 31.123778000619495,
-          "gpu_span_ms": 17.073887825012207,
+          "wall_ms": 19.300411500807968,
+          "wall_ms_min": 16.572591001022374,
+          "wall_ms_max": 25.404297000932274,
+          "gpu_span_ms": 18.856719970703125,
           "samples": 10,
-          "tokens_per_s": 456.3760020329271
+          "tokens_per_s": 414.4989343706531
         },
         "eager_once": {
-          "wall_ms": 18.05201200022566,
-          "wall_ms_min": 16.009106999263167,
-          "wall_ms_max": 34.367131998806144,
-          "gpu_span_ms": 17.946975708007812,
+          "wall_ms": 18.675274501219974,
+          "wall_ms_min": 16.132781998749124,
+          "wall_ms_max": 26.139410998439416,
+          "gpu_span_ms": 18.57033634185791,
           "samples": 10,
-          "tokens_per_s": 443.1638977361635
+          "tokens_per_s": 428.373890808266
         },
         "graph": {
-          "wall_ms": 12.865361999502056,
-          "wall_ms_min": 12.119054999857326,
-          "wall_ms_max": 13.199267999880249,
-          "gpu_span_ms": 12.714303970336914,
+          "wall_ms": 12.44159450106963,
+          "wall_ms_min": 12.20503999866196,
+          "wall_ms_max": 12.813866000215057,
+          "gpu_span_ms": 12.343024253845215,
           "samples": 10,
-          "tokens_per_s": 621.8247104364132
+          "tokens_per_s": 643.0043994210085
         }
       },
-      "graph_fraction_of_ceiling": 0.867878363575903,
-      "eager_item_fraction_of_ceiling": 0.6369622357748874,
-      "wall_ratio_item_over_graph": 1.3625271873772826
+      "graph_fraction_of_ceiling": 0.8974387742647877,
+      "eager_item_fraction_of_ceiling": 0.5785145730427578,
+      "wall_ratio_item_over_graph": 1.551281188206919
     }
   ],
   "trace": {
@@ -192,14 +192,14 @@
         "Trace": 1,
         "cpu_op": 2513,
         "cuda_driver": 121,
-        "cuda_runtime": 412,
+        "cuda_runtime": 411,
         "gpu_memcpy": 13,
         "kernel": 405,
         "overhead": 1
       }
     },
     "graph": {
-      "kernel_launches": 399,
+      "kernel_launches": 401,
       "syncs": {
         "cudaDeviceSynchronize": 2,
         "cudaEventSynchronize": 1,
@@ -210,12 +210,35 @@
       },
       "categories": {
         "Trace": 1,
-        "cpu_op": 161,
-        "cuda_runtime": 55,
-        "gpu_memcpy": 11,
-        "kernel": 399,
+        "cpu_op": 167,
+        "cuda_runtime": 56,
+        "gpu_memcpy": 10,
+        "kernel": 401,
         "overhead": 1
       }
     }
+  },
+  "growing": {
+    "batch": 1,
+    "start_context": 17,
+    "end_context": 128,
+    "pages_at_end": 8,
+    "page_crossings": 6,
+    "captures": 3,
+    "capture_widths": [
+      2,
+      4,
+      8
+    ],
+    "capture_ms": [
+      84.88979200046742,
+      83.46162899761111,
+      84.33210200018948
+    ],
+    "capture_ms_median": 84.33210200018948,
+    "step_ms_median": 10.345183000026736,
+    "step_ms_min": 10.017898999649333,
+    "step_ms_max": 12.720025002636248,
+    "replay_steps": 108
   }
 }

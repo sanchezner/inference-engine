@@ -29,6 +29,7 @@ def main():
     _margin_one_seats_beside_a_long_budget()
     _margin_covering_the_budget_holds_the_spare_page()
     _preemption_matches_a_roomy_run()
+    _random_pressure_matches_a_roomy_run()
     _a_preempted_request_can_stand_past_the_cap()
     _a_budget_above_the_prompt_matches_the_uncapped_steps()
     _a_chunk_emits_nothing_until_the_prompt_is_scored()
@@ -506,6 +507,81 @@ def _preemption_matches_a_roomy_run():
     assert [token for token, _reason in roomy["old"]] == old_tokens
     assert again.stats().counters.requests_aborted == 1
     assert again.stats().blocks_free == again.stats().blocks_total
+
+
+def _random_pressure_matches_a_roomy_run():
+    # Each request fits alone. Together they do not, so a tight pool has to preempt.
+    rng = random.Random(0)
+    for trial in range(12):
+        block = rng.choice((4, 8))
+        n = rng.randint(2, 3)
+        budget = None if rng.randrange(2) == 0 else rng.choice((1, 3))
+        reqs = []
+        needs = []
+        for i in range(n):
+            prompt_len = rng.randint(1, block)
+            max_new = block - prompt_len + 2 + rng.randint(0, block)
+            prompt = tuple(rng.randrange(VOCAB) for _ in range(prompt_len))
+            reqs.append(Request(f"p{trial}-{i}", prompt, max_new_tokens=max_new))
+            needs.append(_pages_needed(block, prompt_len, max_new))
+        tight = max(needs)
+        assert sum(needs) > tight
+        order = list(reqs)
+        rng.shuffle(order)
+        got, saw = _pressure(order, tight, block, budget)
+        assert saw, trial
+        assert got == _run(reqs, pages=sum(needs) + n, margin=0, prefill_budget=budget)
+        for pairs in got.values():
+            assert pairs[-1][1] == "length"
+            assert all(reason is None for _token, reason in pairs[:-1])
+
+    # One request cannot fit the tight pool. It is rejected; the others still match a roomy run.
+    fitting = [
+        Request("fit-a", (1, 1), max_new_tokens=6),
+        Request("fit-b", (2,), max_new_tokens=6),
+    ]
+    huge = Request("huge", (3,) * 5, max_new_tokens=8)
+    roomy = _run(fitting, pages=16, margin=0)
+    got, saw = _pressure(fitting + [huge], tight=2, block=4, budget=None)
+    assert saw
+    assert got["huge"] == [(None, "rejected")]
+    for req in fitting:
+        assert got[req.request_id] == roomy[req.request_id]
+
+
+def _pressure(reqs, tight, block, budget):
+    pool = _pool(tight, block)
+    engine = _engine(pool, max_batch=len(reqs), growth_margin=0, prefill_budget=budget)
+    for req in reqs:
+        engine.add_request(req)
+    grouped = {}
+    saw = False
+    limit = 8 * sum(len(req.prompt_token_ids) + req.max_new_tokens for req in reqs) + 20
+    for _ in range(limit):
+        # A victim re-admitted in the same step is running again, with a shorter cache.
+        before = {slot.request_id: slot.seq.seq_len for slot in engine._running}
+        outs = engine.step()
+        waiting = {item.request.request_id for item in engine._waiting}
+        after = {slot.request_id: slot.seq.seq_len for slot in engine._running}
+        for rid, n in before.items():
+            if rid in waiting or after.get(rid, n) < n:
+                saw = True
+        for out in outs:
+            grouped.setdefault(out.request_id, []).append((out.token_id, out.finish_reason))
+        _conserved(pool, engine)
+        stats = engine.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            finished = stats.counters.requests_finished
+            rejected = stats.counters.requests_rejected
+            assert finished + rejected == len(reqs)
+            assert stats.blocks_free == stats.blocks_total
+            return grouped, saw
+    raise AssertionError("pressured engine did not finish")
+
+
+def _pages_needed(block, prompt_len, max_new):
+    total = prompt_len + max_new - 1
+    return (total + block - 1) // block
 
 
 def _a_preempted_request_can_stand_past_the_cap():

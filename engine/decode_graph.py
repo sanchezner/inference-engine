@@ -9,6 +9,19 @@ from engine.paged import _advance, _decode_math, _logits, _prepare_decode, _stag
 _BUCKETS = (1, 2, 4, 8, 16, 32)
 
 
+def _table_bucket(tight: int, n_pages: int) -> int:
+    # One new column every page would capture again. Powers of two, and never wider than the pool.
+    if tight > n_pages:
+        return tight
+    width = 1
+    while width < tight:
+        nxt = width * 2
+        if nxt > n_pages:
+            return n_pages
+        width = nxt
+    return width
+
+
 @dataclass
 class _Replay:
     graph: torch.cuda.CUDAGraph
@@ -36,10 +49,11 @@ class DecodeGraphs:
         pool, tables, seq_lens, slots = _prepare_decode(seqs, lens, device, check=False)
         if slots is None:
             return None
-        key = (pool.k.data_ptr(), weights.embed.data_ptr(), ids.shape[0], tables.shape[1])
+        width = _table_bucket(tables.shape[1], pool.k.shape[1])
+        key = (pool.k.data_ptr(), weights.embed.data_ptr(), ids.shape[0], width)
         replay = self._graphs.get(key)
         if replay is None:
-            replay = self._capture(key, weights, cfg, rope, seqs, lens, ids, tables, seq_lens, slots)
+            replay = self._capture(key, weights, cfg, rope, seqs, lens, ids, tables, seq_lens, slots, width)
         else:
             self._fill(replay, ids, lens, tables, seq_lens, slots)
             replay.graph.replay()
@@ -47,9 +61,9 @@ class DecodeGraphs:
         # The replay writes the next step into the same logits. Hand back a copy.
         return replay.logits.clone(), seqs
 
-    def _capture(self, key, weights, cfg, rope, seqs, lens, ids, tables, seq_lens, slots) -> _Replay:
+    def _capture(self, key, weights, cfg, rope, seqs, lens, ids, tables, seq_lens, slots, width) -> _Replay:
         device = ids.device
-        batch, width = tables.shape
+        batch = tables.shape[0]
         replay = _Replay(
             graph=torch.cuda.CUDAGraph(),
             ids=torch.empty(batch, 1, dtype=torch.long, device=device),
@@ -79,7 +93,11 @@ class DecodeGraphs:
         replay.ids.copy_(ids)
         positions = _stage(torch.tensor(lens, dtype=torch.long), ids.device).unsqueeze(1)
         replay.positions.copy_(positions)
-        replay.tables.copy_(tables)
+        tight = tables.shape[1]
+        # A shorter row in this bucket must not keep a page id from a longer one.
+        replay.tables[:, :tight].copy_(tables)
+        if tight < replay.tables.shape[1]:
+            replay.tables[:, tight:].zero_()
         replay.seq_lens.copy_(seq_lens)
         replay.slots.copy_(slots)
 

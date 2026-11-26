@@ -51,7 +51,12 @@ METHODOLOGY = (
     "Syncs are CPU ops whose name contains item, tolist, or synchronize. "
     "The graph path's own device-to-host copy is the one pageable transfer from the token list; "
     "the device sync and the event sync are the timer. "
-    "A batch that is not 1, 2, 4, 8, 16, or 32 does not take this path. Host is WSL2."
+    "A batch that is not 1, 2, 4, 8, 16, or 32 does not take this path. "
+    "A second run prefills one sequence to 17 tokens and decodes it to 128 without rewinding seq_len, "
+    "so the block table crosses a page boundary every 16 tokens. "
+    "Capture count is how many graphs that run created. "
+    "Capture time is the wall of a step that created one, including its three warmups. "
+    "Step time is the median wall of the other steps. Host is WSL2."
 )
 
 
@@ -103,6 +108,7 @@ def main():
                             f"  {label} launches {row.get('kernel_launches')}  syncs {row.get('syncs')}",
                             flush=True,
                         )
+        growing = _growing(weights, cfg, rope)
     report = {
         "part": "decode-graph",
         "date": date.today().isoformat(),
@@ -119,10 +125,64 @@ def main():
         "nvidia_smi_after": nvidia_smi(),
         "cases": cases,
         "trace": trace,
+        "growing": growing,
     }
     out = Path(__file__).resolve().parents[1] / "bench" / "results" / f"{report['date']}-graph.json"
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(out)
+
+
+def _growing(weights, cfg, rope) -> dict:
+    # 17 tokens is two pages. 128 tokens is eight. The old key would capture on every new page.
+    start, end = 17, 128
+    pages = (end + BLOCK_SIZE - 1) // BLOCK_SIZE
+    pool = new_page_pool(cfg, n_pages=pages, block_size=BLOCK_SIZE, device="cuda", dtype=weights.embed.dtype)
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(0)
+    seq = new_sequence(pool)
+    prompt = torch.randint(0, cfg.vocab_size, (1, start), device="cuda", generator=generator)
+    forward_paged(weights, cfg, rope, prompt, seq)
+    runner = DecodeGraphs()
+    capture_ms = []
+    capture_widths = []
+    step_ms = []
+    while seq.seq_len < end:
+        token = torch.randint(0, cfg.vocab_size, (1, 1), device="cuda", generator=generator)
+        before = len(runner._graphs)
+        torch.cuda.synchronize()
+        host0 = time.perf_counter()
+        logits, _ = forward_paged_batch(weights, cfg, rope, token, [seq], graphs=runner)
+        greedy_tokens(logits)
+        torch.cuda.synchronize()
+        wall = (time.perf_counter() - host0) * 1e3
+        if len(runner._graphs) > before:
+            capture_ms.append(wall)
+            capture_widths.append(next(reversed(runner._graphs))[3])
+        else:
+            step_ms.append(wall)
+    report = {
+        "batch": 1,
+        "start_context": start,
+        "end_context": end,
+        "pages_at_end": pages,
+        "page_crossings": pages - (start + BLOCK_SIZE - 1) // BLOCK_SIZE,
+        "captures": len(capture_ms),
+        "capture_widths": capture_widths,
+        "capture_ms": capture_ms,
+        "capture_ms_median": statistics.median(capture_ms),
+        "step_ms_median": statistics.median(step_ms),
+        "step_ms_min": min(step_ms),
+        "step_ms_max": max(step_ms),
+        "replay_steps": len(step_ms),
+    }
+    print(
+        f"growing {start}->{end}  captures {report['captures']} at widths {capture_widths}  "
+        f"capture {report['capture_ms_median']:.1f} ms  step {report['step_ms_median']:.2f} ms",
+        flush=True,
+    )
+    del seq
+    torch.cuda.empty_cache()
+    return report
 
 
 def _case(weights, cfg, rope, lengths, bandwidth, clocks) -> dict:
