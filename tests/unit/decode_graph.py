@@ -135,8 +135,9 @@ def _walk_across_pages(cfg, weights, rope, lengths, stop, buckets, seed):
 def _a_stable_batch_reuses_the_booked_table():
     cfg, weights, rope = _model(torch.float32, seed=30)
     prompts = ((1, 2, 3, 4, 5), (6, 7, 8))
-    off, _ = _engine_tokens(cfg, weights, rope, prompts, graphs=False, max_batch=2)
-    on, runner = _engine_tokens(cfg, weights, rope, prompts, graphs=True, max_batch=2)
+    # Three joint decodes after the solo step: capture, book, then reuse.
+    off, _ = _engine_tokens(cfg, weights, rope, prompts, graphs=False, max_batch=2, max_new=6)
+    on, runner = _engine_tokens(cfg, weights, rope, prompts, graphs=True, max_batch=2, max_new=6)
     assert on == off
     # Capture, then one replay books the table, then the next replay uses it.
     assert runner.reused >= 1
@@ -240,16 +241,17 @@ def _the_engine_matches_eager():
     on, on_runner = _engine_tokens(cfg, weights, rope, pair, graphs=True, max_batch=2)
     assert on == off
     assert off_runner is None
-    assert len(on_runner._graphs) == 1
+    # The first request decodes alone, then the pair. Both sizes are captured.
+    assert {key[2] for key in on_runner._graphs} == {1, 2}
     three = pair + ((9, 10, 11),)
     odd, odd_runner = _engine_tokens(cfg, weights, rope, three, graphs=True, max_batch=3)
     eager, _eager_runner = _engine_tokens(cfg, weights, rope, three, graphs=False, max_batch=3)
     assert odd == eager
-    # Batch 3 is not a capture size, so the flag stays on and the forward stays eager.
-    assert odd_runner._graphs == {}
+    # Batch 3 is not a capture size. The ramp still captures 1 and 2 on the way there.
+    assert {key[2] for key in odd_runner._graphs} == {1, 2}
 
 
-def _engine_tokens(cfg, weights, rope, prompts, graphs, max_batch):
+def _engine_tokens(cfg, weights, rope, prompts, graphs, max_batch, max_new=4):
     pool = new_page_pool(cfg, n_pages=16, block_size=16, device="cuda", dtype=weights.embed.dtype)
     engine = EngineCore(
         partial(forward_paged, weights, cfg, rope),
@@ -260,7 +262,7 @@ def _engine_tokens(cfg, weights, rope, prompts, graphs, max_batch):
     )
     got = {}
     for i, prompt in enumerate(prompts):
-        engine.add_request(Request(str(i), prompt, max_new_tokens=4))
+        engine.add_request(Request(str(i), prompt, max_new_tokens=max_new))
         got[str(i)] = []
     for _ in range(32):
         outs = engine.step()

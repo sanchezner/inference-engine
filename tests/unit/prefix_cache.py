@@ -131,8 +131,11 @@ def _eviction_spares_a_live_page():
     held = list(live.seq.blocks)
     engine.add_request(Request("old", (10, 11, 12, 13), max_new_tokens=1))
     engine.add_request(Request("new", (20, 21, 22, 23), max_new_tokens=1))
+    # old samples, so new waits for the next step. Each leaves a cached block behind.
+    engine.step()
     engine.step()
     assert engine.stats().requests_running == 1
+    assert engine.stats().requests_waiting == 0
     assert pool.free == []
     assert set(pool.cache.lru) == {2, 3}
     engine.add_request(Request("bump", (30, 31, 32, 33), max_new_tokens=1))
@@ -175,9 +178,11 @@ def _a_partial_tail_is_not_shared():
     engine.add_request(Request("a", prompt, max_new_tokens=4))
     engine.add_request(Request("b", prompt, max_new_tokens=4))
     first = engine.step()
-    assert [out.request_id for out in first] == ["a", "b"]
+    assert [out.request_id for out in first] == ["a"]
     assert first[0].cached_tokens == 0
-    assert first[1].cached_tokens == 4
+    second = engine.step()
+    assert [out.request_id for out in second] == ["a", "b"]
+    assert second[1].cached_tokens == 4
     running = {slot.request_id: slot for slot in engine._running}
     assert running["a"].seq.blocks[0] == running["b"].seq.blocks[0]
     assert running["a"].seq.blocks[1] != running["b"].seq.blocks[1]

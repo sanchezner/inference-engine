@@ -33,7 +33,8 @@ def main():
     _a_preempted_request_can_stand_past_the_cap()
     _a_budget_above_the_prompt_matches_the_uncapped_steps()
     _a_chunk_emits_nothing_until_the_prompt_is_scored()
-    _a_step_splits_the_budget_across_waiters()
+    _a_sampled_prefill_stops_admission()
+    _a_partial_chunk_still_shares_the_step()
     _decode_continues_during_a_chunked_prefill()
     _chunked_prefill_matches_an_uncapped_run()
     _chunked_interleaving_conserves_pages()
@@ -438,9 +439,13 @@ def _margin_one_seats_beside_a_long_budget():
     for req in reqs:
         tight.add_request(req)
     first = tight.step()
-    assert [out.request_id for out in first] == ["grow", "hold"]
-    assert first[1].finish_reason == "length"
-    got = _group(first)
+    assert [out.request_id for out in first] == ["grow"]
+    # grow sampled, so hold waits. The next step decodes grow, then seats hold beside it.
+    second = tight.step()
+    assert [out.request_id for out in second] == ["grow", "hold"]
+    assert second[1].finish_reason == "length"
+    assert any(slot.request_id == "grow" for slot in tight._running)
+    got = _group(first + second)
     for rid, pairs in _drain(tight).items():
         got.setdefault(rid, []).extend(pairs)
     assert got == roomy
@@ -518,8 +523,9 @@ def _preemption_matches_a_roomy_run():
 
 
 def _random_pressure_matches_a_roomy_run():
-    # Each request fits alone. Together they do not, so a tight pool has to preempt.
+    # Each request fits alone and together they do not. A draw that never overlaps does not preempt.
     rng = random.Random(0)
+    saw_any = False
     for trial in range(12):
         block = rng.choice((4, 8))
         n = rng.randint(2, 3)
@@ -537,11 +543,12 @@ def _random_pressure_matches_a_roomy_run():
         order = list(reqs)
         rng.shuffle(order)
         got, saw = _pressure(order, tight, block, budget)
-        assert saw, trial
+        saw_any = saw_any or saw
         assert got == _run(reqs, pages=sum(needs) + n, margin=0, prefill_budget=budget)
         for pairs in got.values():
             assert pairs[-1][1] == "length"
             assert all(reason is None for _token, reason in pairs[:-1])
+    assert saw_any
 
     # One request cannot fit the tight pool. It is rejected; the others still match a roomy run.
     fitting = [
@@ -656,20 +663,51 @@ def _a_chunk_emits_nothing_until_the_prompt_is_scored():
     _conserved(pool, engine)
 
 
-def _a_step_splits_the_budget_across_waiters():
+def _a_sampled_prefill_stops_admission():
+    # a finishes inside the budget. b waits even though tokens and a seat remain.
     pool = _pool(16, 4)
     engine = _engine(pool, max_batch=2, prefill_budget=6)
     engine.add_request(Request("a", (1, 1, 1, 1), max_new_tokens=1))
     engine.add_request(Request("b", (2, 2, 2, 2), max_new_tokens=1))
     first = engine.step()
     assert [(out.request_id, out.finish_reason) for out in first] == [("a", "length")]
-    assert engine.stats().requests_running == 1
-    assert engine.stats().pending_prefill_tokens == 2
+    assert engine.stats().requests_running == 0
+    assert engine.stats().requests_waiting == 1
+    assert engine.stats().pending_prefill_tokens == 4
     second = engine.step()
     assert [(out.request_id, out.token_id, out.finish_reason) for out in second] == [(
         "b", (2 + 1) % VOCAB, "length",
     )]
     assert engine.stats().blocks_free == 16
+    _conserved(pool, engine)
+
+    bare = _engine(_pool(16, 4), max_batch=2)
+    bare.add_request(Request("a", (1, 2), max_new_tokens=4))
+    bare.add_request(Request("b", (3, 4), max_new_tokens=3))
+    opened = bare.step()
+    assert [out.request_id for out in opened] == ["a"]
+    assert bare.stats().requests_waiting == 1
+    nxt = bare.step()
+    assert [out.request_id for out in nxt] == ["a", "b"]
+    assert bare.stats().requests_running == 2
+    assert bare.stats().requests_waiting == 0
+
+
+def _a_partial_chunk_still_shares_the_step():
+    # chat is already decoding. long's chunk does not sample, so it still rides this step.
+    pool = _pool(16, 4)
+    engine = _engine(pool, max_batch=2, prefill_budget=4)
+    engine.add_request(Request("chat", (1,), max_new_tokens=4))
+    assert [out.token_id for out in engine.step()] == [2]
+    engine.add_request(Request("long", tuple(range(2, 10)), max_new_tokens=2))
+    step = engine.step()
+    assert [out.request_id for out in step] == ["chat"]
+    assert engine.stats().requests_running == 2
+    assert engine.stats().requests_waiting == 0
+    running = {slot.request_id: slot for slot in engine._running}
+    assert running["long"].last_token is None
+    assert len(running["long"].written) == 4
+    assert engine.stats().pending_prefill_tokens == 4
     _conserved(pool, engine)
 
 

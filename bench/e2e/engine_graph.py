@@ -35,7 +35,7 @@ SEED = 0
 WARMUP = 1
 REPS = 5
 BANDWIDTH_FILE = "bench/results/2026-10-31-bandwidth.json"
-BASELINE_FILE = "bench/results/2026-11-27-engine-graph.json"
+BASELINE_FILE = "bench/results/2026-11-27-engine-overlap.json"
 
 
 def _methodology(args) -> str:
@@ -43,26 +43,28 @@ def _methodology(args) -> str:
     return (
         "Open-loop burst through EngineCore on CUDA bf16, greedy. "
         f"A case is {args.prompt_len}-token prompts, {args.max_tokens} new tokens, block size {args.block_size}. "
-        "Every request arrives at t=0. max_batch equals the case batch, so after the first step they decode together. "
+        "Every request arrives at t=0. max_batch equals the case batch. "
+        "A prefill that samples a token stops admission, so the next step decodes that token before the next prefill. "
+        "A chunk that has not sampled can still share the step. "
         "Graphs off is the eager decode forward. Graphs on passes DecodeGraphs into that forward. "
         "On a replay, the CPU books the next block table while that graph runs, and seats a waiter "
         "into a seat that is already free. The token read is the join: a finish, and a seat that finish "
-        "frees, are decided after it. "
-        "The batch-8 inter-token p99 is not one of those decode steps. Every request is seated in the "
-        "first step, and a token is stamped when its prefill finishes, so the first gap of an early "
-        "request includes the prefills seated after it. later_p99_s drops those first gaps. "
-        f"The run before this overlap is {BASELINE_FILE}. "
+        "frees, are decided after it. The forward for a seat taken there still waits until after that read, "
+        "and stops once one of those prefills samples. "
+        f"The previous burst, which seated every request in the first step, is {BASELINE_FILE}. "
+        "There the batch-8 inter-token p99 is that first gap. "
         "The pool is one spare page per request past the final length, and at least 32 pages, "
         "so a table-width bucket is not clipped by a tiny pool and the run does not preempt. "
-        "One warmup replay per mode is discarded. It also captures the graph: the first decode already spans "
-        "nine pages, which buckets to 16, and the run never reaches a wider bucket. "
+        "One warmup replay per mode is discarded. It also captures the graphs: the ramp decodes at each "
+        "bucketed batch, the first of those already spans nine pages, which buckets to 16, and the run "
+        "never reaches a wider bucket. "
         f"{args.reps} timed replays follow on the same pool and the same runner. "
         "Decode tokens/s is batch / inter-token p50. The requests share each decode step, so that p50 is the step. "
         "p50 is nearest-rank over one replay. The reported value is the median of those p50s, with the min and max. "
         f"The ceiling is decode_step_bytes at context {mid}, the cached length before the middle decode step, "
         "over the median copy in bench/results/2026-10-31-bandwidth.json. "
         "Context at the first decode is the prompt length; at the last it is the prompt plus the new tokens, minus one. "
-        "The trace is the second step of a fresh burst after those replays: the first step prefills, the second only decodes. "
+        "The trace is one decode step after every request has been prefilled: each earlier step samples at most one new prefill. "
         "It is one engine step, with no extra timer sync inside the profiled region. "
         "Device-to-host copies are chrome events whose name contains DtoH. "
         "The intended copy is the one pageable read of the batch's token ids. "
@@ -111,12 +113,13 @@ def main(argv=None):
                 f"tokens_equal {case['tokens_equal']}  "
                 f"dtoh off {case['trace']['off']['device_to_host_count']} "
                 f"on {case['trace']['on']['device_to_host_count']}  "
+                f"itl p99 {case['on']['itl_p99_s']['median'] * 1e3:.1f} ms "
                 f"later p99 {case['on']['gaps']['later_p99_s']['median'] * 1e3:.1f} ms "
                 f"first max {case['on']['gaps']['first_max_s']['median'] * 1e3:.1f} ms",
                 flush=True,
             )
     report = {
-        "part": "engine-overlap",
+        "part": "engine-burst",
         "baseline_file": BASELINE_FILE,
         "date": date.today().isoformat(),
         "host": "WSL2",
@@ -142,7 +145,7 @@ def main(argv=None):
     text = json.dumps(report, indent=2) + "\n"
     out = args.out
     if out is None:
-        out = _ROOT / "bench" / "results" / f"{report['date']}-engine-overlap.json"
+        out = _ROOT / "bench" / "results" / f"{report['date']}-engine-burst.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text)
     print(out)
@@ -243,13 +246,19 @@ def _once(engine, trace, calls, batch) -> dict:
 
 
 def _profile_decode(engine, trace, calls, batch) -> dict:
-    # First step seats and prefills. The second step is decode only.
+    # Each step samples at most one new prefill. The step after the last of those only decodes.
     for item in trace:
         engine.add_request(Request(item.request_id, item.prompt, item.max_tokens))
     before = calls["n"]
-    engine.step()
+    for _ in range(batch):
+        engine.step()
     if calls["n"] - before != batch:
         raise RuntimeError(f"profile burst prefilled {calls['n'] - before} times for a batch of {batch}")
+    if engine.stats().requests_waiting != 0 or engine.stats().requests_running != batch:
+        raise RuntimeError(
+            f"profile burst left waiting {engine.stats().requests_waiting} "
+            f"running {engine.stats().requests_running}"
+        )
     before = calls["n"]
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         outs = engine.step()
