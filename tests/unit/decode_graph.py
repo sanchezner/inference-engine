@@ -25,6 +25,9 @@ def main():
     _crossing_pages_uses_one_graph_per_bucket()
     _greedy_tokens_are_one_list()
     _the_engine_matches_eager()
+    _a_stable_batch_reuses_the_booked_table()
+    _a_free_seat_is_booked_before_the_token_read()
+    _a_finish_does_not_free_its_seat_early()
 
 
 def _a_bucket_matches_eager():
@@ -127,6 +130,101 @@ def _walk_across_pages(cfg, weights, rope, lengths, stop, buckets, seed):
             assert len(runner._graphs) == seen
     assert {key[3] for key in runner._graphs} == buckets
     assert seen is not None
+
+
+def _a_stable_batch_reuses_the_booked_table():
+    cfg, weights, rope = _model(torch.float32, seed=30)
+    prompts = ((1, 2, 3, 4, 5), (6, 7, 8))
+    off, _ = _engine_tokens(cfg, weights, rope, prompts, graphs=False, max_batch=2)
+    on, runner = _engine_tokens(cfg, weights, rope, prompts, graphs=True, max_batch=2)
+    assert on == off
+    # Capture, then one replay books the table, then the next replay uses it.
+    assert runner.reused >= 1
+
+
+def _a_free_seat_is_booked_before_the_token_read():
+    cfg, weights, rope = _model(torch.float32, seed=31)
+    notes = []
+    engine = _booked_engine(cfg, weights, rope, 2, notes)
+    engine.add_request(Request("a", (1, 2, 3, 4), max_new_tokens=4))
+    engine.step()
+    engine.step()
+    assert notes == []
+    engine.add_request(Request("b", (5, 6, 7), max_new_tokens=2))
+    outs = engine.step()
+    assert len(notes) == 1
+    before, after = notes[0]
+    assert before["waiting"] == ["b"]
+    assert [row[0] for row in before["running"]] == ["a"]
+    assert after["waiting"] == []
+    booked = [row for row in after["running"] if row[0] == "b"]
+    assert booked == [("b", None, 0)]
+    assert [row for row in after["running"] if row[0] == "a"] == before["running"]
+    assert any(out.request_id == "b" and out.token_id is not None for out in outs)
+    _idle(engine)
+
+
+def _a_finish_does_not_free_its_seat_early():
+    cfg, weights, rope = _model(torch.float32, seed=32)
+    notes = []
+    engine = _booked_engine(cfg, weights, rope, 1, notes)
+    engine.add_request(Request("a", (1, 2, 3, 4), max_new_tokens=3))
+    engine.step()
+    engine.step()
+    assert notes == []
+    engine.add_request(Request("b", (8, 9), max_new_tokens=2))
+    outs = engine.step()
+    assert len(notes) == 1
+    before, after = notes[0]
+    assert before["waiting"] == ["b"] and after["waiting"] == ["b"]
+    assert [row[0] for row in after["running"]] == ["a"]
+    assert before["running"][0][1] == after["running"][0][1]
+    assert any(out.request_id == "a" and out.finish_reason == "length" for out in outs)
+    assert any(out.request_id == "b" and out.token_id is not None for out in outs)
+    _idle(engine)
+
+
+def _booked_engine(cfg, weights, rope, max_batch, notes):
+    pool = new_page_pool(cfg, n_pages=32, block_size=16, device="cuda", dtype=weights.embed.dtype)
+    base = partial(forward_paged_batch, weights, cfg, rope)
+    engine = None
+
+    def batch(ids, seqs, graphs=None, on_replay=None):
+        def wrapped():
+            before = _snap(engine)
+            on_replay()
+            notes.append((before, _snap(engine)))
+
+        return base(ids, seqs, graphs=graphs, on_replay=wrapped if on_replay is not None else None)
+
+    engine = EngineCore(
+        partial(forward_paged, weights, cfg, rope),
+        batch,
+        pool,
+        max_batch,
+        graphs=True,
+    )
+    return engine
+
+
+def _snap(engine):
+    return {
+        "waiting": [item.request.request_id for item in engine._waiting],
+        "running": [
+            (slot.request_id, slot.last_token, slot.seq.seq_len)
+            for slot in engine._running
+        ],
+    }
+
+
+def _idle(engine):
+    for _ in range(16):
+        engine.step()
+        stats = engine.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            assert stats.blocks_free == stats.blocks_total
+            return
+    raise AssertionError("engine did not finish")
 
 
 def _greedy_tokens_are_one_list():

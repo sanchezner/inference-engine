@@ -18,7 +18,7 @@ import torch
 from torch.profiler import ProfilerActivity, profile
 
 from bench.env import environment, nvidia_smi, snapshot_revision
-from bench.e2e.trace import TraceRequest, replay
+from bench.e2e.trace import TraceRequest, percentile, replay
 from bench.roofline import decode_ceiling_tokens_per_s, decode_step_bytes
 from checks.oracle import load_engine
 from engine.paged import forward_paged, forward_paged_batch, new_page_pool, pages_for
@@ -35,6 +35,7 @@ SEED = 0
 WARMUP = 1
 REPS = 5
 BANDWIDTH_FILE = "bench/results/2026-10-31-bandwidth.json"
+BASELINE_FILE = "bench/results/2026-11-27-engine-graph.json"
 
 
 def _methodology(args) -> str:
@@ -44,6 +45,13 @@ def _methodology(args) -> str:
         f"A case is {args.prompt_len}-token prompts, {args.max_tokens} new tokens, block size {args.block_size}. "
         "Every request arrives at t=0. max_batch equals the case batch, so after the first step they decode together. "
         "Graphs off is the eager decode forward. Graphs on passes DecodeGraphs into that forward. "
+        "On a replay, the CPU books the next block table while that graph runs, and seats a waiter "
+        "into a seat that is already free. The token read is the join: a finish, and a seat that finish "
+        "frees, are decided after it. "
+        "The batch-8 inter-token p99 is not one of those decode steps. Every request is seated in the "
+        "first step, and a token is stamped when its prefill finishes, so the first gap of an early "
+        "request includes the prefills seated after it. later_p99_s drops those first gaps. "
+        f"The run before this overlap is {BASELINE_FILE}. "
         "The pool is one spare page per request past the final length, and at least 32 pages, "
         "so a table-width bucket is not clipped by a tiny pool and the run does not preempt. "
         "One warmup replay per mode is discarded. It also captures the graph: the first decode already spans "
@@ -102,11 +110,14 @@ def main(argv=None):
                 f"({case['on']['fraction_of_ceiling']:.3f})  "
                 f"tokens_equal {case['tokens_equal']}  "
                 f"dtoh off {case['trace']['off']['device_to_host_count']} "
-                f"on {case['trace']['on']['device_to_host_count']}",
+                f"on {case['trace']['on']['device_to_host_count']}  "
+                f"later p99 {case['on']['gaps']['later_p99_s']['median'] * 1e3:.1f} ms "
+                f"first max {case['on']['gaps']['first_max_s']['median'] * 1e3:.1f} ms",
                 flush=True,
             )
     report = {
-        "part": "engine-graph",
+        "part": "engine-overlap",
+        "baseline_file": BASELINE_FILE,
         "date": date.today().isoformat(),
         "host": "WSL2",
         "command": _command(args),
@@ -131,7 +142,7 @@ def main(argv=None):
     text = json.dumps(report, indent=2) + "\n"
     out = args.out
     if out is None:
-        out = _ROOT / "bench" / "results" / f"{report['date']}-engine-graph.json"
+        out = _ROOT / "bench" / "results" / f"{report['date']}-engine-overlap.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text)
     print(out)
@@ -226,6 +237,7 @@ def _once(engine, trace, calls, batch) -> dict:
         "ttft_p50_s": summary["ttft_s"]["p50"],
         "elapsed_s": summary["elapsed_s"],
         "decode_tokens_per_s": batch / itl,
+        "gaps": _gaps(by_request),
         "tokens": _tokens(by_request),
     }
 
@@ -301,7 +313,31 @@ def _column(runs) -> dict:
         "ttft_p50_s": _spread(run["ttft_p50_s"] for run in runs),
         "elapsed_s": _spread(run["elapsed_s"] for run in runs),
         "decode_tokens_per_s": rate,
+        "gaps": {
+            "first_max_s": _spread(run["gaps"]["first_max_s"] for run in runs),
+            "later_p50_s": _spread(run["gaps"]["later_p50_s"] for run in runs),
+            "later_p99_s": _spread(run["gaps"]["later_p99_s"] for run in runs),
+        },
         "runs": kept,
+    }
+
+
+def _gaps(by_request):
+    first = []
+    later = []
+    for outputs in by_request.values():
+        times = [out.timestamps.emitted for out in outputs if out.token_id is not None]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        if not gaps:
+            continue
+        first.append(gaps[0])
+        later.extend(gaps[1:])
+    if not first:
+        raise RuntimeError("trace produced no inter-token gap")
+    return {
+        "first_max_s": max(first),
+        "later_p50_s": percentile(later, 50),
+        "later_p99_s": percentile(later, 99),
     }
 
 

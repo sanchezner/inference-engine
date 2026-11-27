@@ -203,6 +203,7 @@ def gather_padded(seqs: list[Sequence], layer: int, lens: list[int], width: int)
 
 def forward_paged_batch(
     weights: Weights, cfg: ModelConfig, rope, ids: torch.Tensor, seqs: list[Sequence], *, graphs=None,
+    on_replay=None,
 ):
     # One new token on CUDA reads each sequence's own length.
     # A fresh batch uses SDPA. A batch that already has pages still left-pads.
@@ -219,7 +220,7 @@ def forward_paged_batch(
     lens = [seq.seq_len for seq in seqs]
     T_new = ids.shape[1]
     if graphs is not None and _use_decode_kernel(weights, cfg, seqs[0].pool, T_new):
-        ran = graphs.try_decode(weights, cfg, rope, ids, seqs)
+        ran = graphs.try_decode(weights, cfg, rope, ids, seqs, on_replay=on_replay)
         if ran is not None:
             return ran
     x = weights.embed[ids]

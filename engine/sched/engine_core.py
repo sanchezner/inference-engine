@@ -161,7 +161,7 @@ class EngineCore:
             ),
         )
 
-    def _admit(self, outputs: list[StepOutput], budget: int | None) -> None:
+    def _admit(self, outputs: list[StepOutput], budget: int | None, *, launch=True) -> None:
         while len(self._running) < self.max_batch and self._waiting and budget != 0:
             item = self._waiting[0]
             req = item.request
@@ -182,7 +182,7 @@ class EngineCore:
                 if want < 1:
                     break
             self._waiting.popleft()
-            self._seat(item, tokens, blocks, cached_tokens, cached_tokens + want, outputs)
+            self._seat(item, tokens, blocks, cached_tokens, cached_tokens + want, outputs, launch=launch)
             if budget is not None:
                 budget -= want
 
@@ -315,7 +315,7 @@ class EngineCore:
     def _unscored(self, slot: _Running) -> int:
         return len(slot.request.prompt_token_ids) + len(slot.recompute) - len(slot.written)
 
-    def _seat(self, item: _Waiting, tokens, blocks, cached_tokens, chunk_end, outputs) -> None:
+    def _seat(self, item: _Waiting, tokens, blocks, cached_tokens, chunk_end, outputs, *, launch=True) -> None:
         req = item.request
         seq = new_sequence(self.pool)
         if blocks:
@@ -341,6 +341,10 @@ class EngineCore:
             generator=item.generator,
         )
         self._running.append(slot)
+        if not launch:
+            # The decode graph is still writing the pool. This prompt's forward waits for the token read.
+            reserve_pages(seq, chunk_end)
+            return
         self._extend_to(slot, tokens, chunk_end, outputs)
 
     def _extend(self, slot: _Running, outputs: list[StepOutput], budget: int | None) -> int:
@@ -400,13 +404,43 @@ class EngineCore:
         self._finished += 1
         self._held.discard(slot.request_id)
 
+    def _overlap(self) -> None:
+        # The new token is still on the device. A seat this step frees is not free yet.
+        self._stage_next_decode()
+        self._attach_ready()
+
+    def _stage_next_decode(self) -> None:
+        decoding = self._decoding()
+        if not decoding:
+            return
+        bs = self.pool.block_size
+        need = 0
+        for slot in decoding:
+            have = len(slot.seq.blocks)
+            want = pages_for(bs, slot.seq.seq_len + 1)
+            if want < have:
+                raise RuntimeError(f"request {slot.request_id} holds more pages than its next token can use")
+            need += want - have
+        # Taking a running request's page would recycle one the graph is still writing.
+        if need > self._allocatable():
+            return
+        for slot in decoding:
+            reserve_pages(slot.seq, slot.seq.seq_len + 1)
+        self._graphs.stage([slot.seq for slot in decoding])
+
+    def _attach_ready(self) -> None:
+        # A prompt already seated keeps the pages its next chunk will write.
+        if any(slot.last_token is None for slot in self._running):
+            return
+        self._admit([], self.prefill_budget, launch=False)
+
     def _decode(self) -> list[StepOutput]:
         decoding = self._decoding()
         seqs = [slot.seq for slot in decoding]
         last = torch.tensor([slot.last_token for slot in decoding], dtype=torch.long).view(-1, 1)
         # A CPU pool has nothing to replay. Prefill stays on forward_one either way.
         if self._graphs is not None and self.pool.k.is_cuda:
-            logits, _seqs = self.forward_batch(last, seqs, graphs=self._graphs)
+            logits, _seqs = self.forward_batch(last, seqs, graphs=self._graphs, on_replay=self._overlap)
         else:
             logits, _seqs = self.forward_batch(last, seqs)
         tokens = self._sample_rows(decoding, logits)
