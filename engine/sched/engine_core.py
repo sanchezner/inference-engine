@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+from engine.decode_graph import DecodeGraphs
 from engine.kv.prefix_cache import match_prefix, publish_written
 from engine.paged import (
     Sequence,
@@ -15,7 +16,7 @@ from engine.paged import (
     reserve_pages,
 )
 from engine.sched.request import EngineCounters, EngineStats, OutputTimestamps, QueueFull, Request, StepOutput
-from engine.sched.sampling import ensure_generator, sample_token
+from engine.sched.sampling import ensure_generator, sample_batch, sample_token
 
 
 @dataclass
@@ -52,7 +53,7 @@ class _Running:
 class EngineCore:
     def __init__(
         self, forward_one, forward_batch, pool, max_batch, clock=None, max_waiting=256, growth_margin=1,
-        prefill_budget=None,
+        prefill_budget=None, graphs=False,
     ):
         if isinstance(max_batch, bool) or not isinstance(max_batch, int) or max_batch < 1:
             raise ValueError(f"max_batch must be an int >= 1, got {max_batch!r}")
@@ -66,6 +67,9 @@ class EngineCore:
             isinstance(prefill_budget, bool) or not isinstance(prefill_budget, int) or prefill_budget < 1
         ):
             raise ValueError(f"prefill_budget must be an int >= 1 or None, got {prefill_budget!r}")
+        # Off unless asked. The stub tests and the fp32 checks never pass a graph in.
+        if not isinstance(graphs, bool):
+            raise ValueError(f"graphs must be a bool, got {graphs!r}")
         self.forward_one = forward_one
         self.forward_batch = forward_batch
         self.pool = pool
@@ -73,6 +77,7 @@ class EngineCore:
         self.max_waiting = max_waiting
         self.growth_margin = growth_margin
         self.prefill_budget = prefill_budget
+        self._graphs = DecodeGraphs() if graphs else None
         self.clock = time.perf_counter if clock is None else clock
         self._waiting = deque()
         self._running = []
@@ -379,6 +384,7 @@ class EngineCore:
         publish_written(self.pool.cache, seq.blocks, written)
         if chunk_end < len(tokens):
             return
+        # This token can free a seat before the next request is seated, so it is read on its own.
         token = self._sample_one(slot, logits)
         generated = slot.generated + 1
         reason = _finish_reason(token, generated, slot.max_new_tokens, slot.stop_ids)
@@ -396,8 +402,13 @@ class EngineCore:
 
     def _decode(self) -> list[StepOutput]:
         decoding = self._decoding()
+        seqs = [slot.seq for slot in decoding]
         last = torch.tensor([slot.last_token for slot in decoding], dtype=torch.long).view(-1, 1)
-        logits, _seqs = self.forward_batch(last, [slot.seq for slot in decoding])
+        # A CPU pool has nothing to replay. Prefill stays on forward_one either way.
+        if self._graphs is not None and self.pool.k.is_cuda:
+            logits, _seqs = self.forward_batch(last, seqs, graphs=self._graphs)
+        else:
+            logits, _seqs = self.forward_batch(last, seqs)
         tokens = self._sample_rows(decoding, logits)
         outputs = []
         finished = set()
@@ -425,10 +436,14 @@ class EngineCore:
         return outputs
 
     def _sample_rows(self, slots, logits) -> list[int]:
-        # A sampled row has its own generator, so only an all-greedy batch shares one argmax transfer.
-        if all(slot.request.sampling.temperature == 0.0 for slot in slots):
-            return [int(token) for token in torch.argmax(logits, dim=-1).tolist()]
-        return [self._sample_one(slot, row) for slot, row in zip(slots, logits)]
+        params = []
+        generators = []
+        for slot in slots:
+            sampling = slot.request.sampling
+            slot.generator = ensure_generator(sampling, slot.generator, logits.device)
+            params.append(sampling)
+            generators.append(slot.generator)
+        return sample_batch(logits, params, generators)
 
     def _sample_one(self, slot: _Running, logits) -> int:
         params = slot.request.sampling

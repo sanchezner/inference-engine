@@ -1,7 +1,7 @@
 import torch
 
 from engine.sched.request import SamplingParams
-from engine.sched.sampling import _restrict, ensure_generator, sample_token
+from engine.sched.sampling import _restrict, ensure_generator, sample_batch, sample_token
 
 
 def main():
@@ -10,6 +10,7 @@ def main():
     _a_disabled_cap_matches_the_full_row()
     _the_same_seed_repeats()
     _a_generator_stays_on_its_device()
+    _a_batch_matches_one_row_at_a_time()
 
 
 def _temperature_zero_is_argmax():
@@ -71,6 +72,46 @@ def _a_generator_stays_on_its_device():
         assert "generator" in str(exc)
     else:
         raise AssertionError("a cpu generator was used on cuda logits")
+
+
+def _a_batch_matches_one_row_at_a_time():
+    logits = torch.tensor([
+        [0.2, 0.7, 0.1, 0.4],
+        [0.4, 0.1, 0.7, 0.2],
+        [1.0, 0.0, 0.2, 0.1],
+    ])
+    params = [
+        SamplingParams(temperature=1, seed=5),
+        SamplingParams(temperature=1, top_k=2, top_p=0.8, seed=6),
+        SamplingParams(temperature=0, top_k=1, top_p=0.1, seed=7),
+    ]
+    _batch_matches_rows(logits, params)
+    greedy = [SamplingParams() for _ in range(len(params))]
+    assert sample_batch(logits, greedy, [None] * len(params)) == [int(torch.argmax(row)) for row in logits]
+    if torch.cuda.is_available():
+        _batch_matches_rows(logits.to("cuda"), params)
+
+
+def _batch_matches_rows(logits, params):
+    first_gens = _generators(params, logits.device)
+    second_gens = _generators(params, logits.device)
+    alone = [sample_token(logits[i], params[i], first_gens[i]) for i in range(len(params))]
+    assert sample_batch(logits, params, second_gens) == alone
+    # The batch draw has to consume each stream once, same as the row draw.
+    again = [sample_token(logits[i], params[i], first_gens[i]) for i in range(len(params))]
+    assert sample_batch(logits, params, second_gens) == again
+
+
+def _generators(params, device):
+    gens = []
+    for item in params:
+        if item.temperature == 0.0:
+            gens.append(None)
+            continue
+        generator = torch.Generator(device=device)
+        generator.manual_seed(item.seed)
+        gens.append(generator)
+    return gens
 
 
 def _draw(logits, params, n):

@@ -1,9 +1,13 @@
 import torch
 
+from functools import partial
+
 from engine.config import ModelConfig
 from engine.decode_graph import DecodeGraphs, _table_bucket, greedy_tokens
 from engine.model import RopeTables
 from engine.paged import forward_paged, forward_paged_batch, new_page_pool, new_sequence
+from engine.sched.engine_core import EngineCore
+from engine.sched.request import Request
 from engine.weights import LayerWeights, Weights
 
 
@@ -20,6 +24,7 @@ def main():
     _an_odd_batch_stays_eager()
     _crossing_pages_uses_one_graph_per_bucket()
     _greedy_tokens_are_one_list()
+    _the_engine_matches_eager()
 
 
 def _a_bucket_matches_eager():
@@ -127,6 +132,48 @@ def _walk_across_pages(cfg, weights, rope, lengths, stop, buckets, seed):
 def _greedy_tokens_are_one_list():
     logits = torch.tensor([[0.0, 2.0, 1.0], [3.0, 0.0, 0.5]])
     assert greedy_tokens(logits) == [1, 0]
+
+
+def _the_engine_matches_eager():
+    # fp32 greedy tokens are exact, so a replayed decode has to match the eager engine.
+    cfg, weights, rope = _model(torch.float32, seed=21)
+    pair = ((1, 2, 3, 4, 5), (6, 7, 8))
+    off, off_runner = _engine_tokens(cfg, weights, rope, pair, graphs=False, max_batch=2)
+    on, on_runner = _engine_tokens(cfg, weights, rope, pair, graphs=True, max_batch=2)
+    assert on == off
+    assert off_runner is None
+    assert len(on_runner._graphs) == 1
+    three = pair + ((9, 10, 11),)
+    odd, odd_runner = _engine_tokens(cfg, weights, rope, three, graphs=True, max_batch=3)
+    eager, _eager_runner = _engine_tokens(cfg, weights, rope, three, graphs=False, max_batch=3)
+    assert odd == eager
+    # Batch 3 is not a capture size, so the flag stays on and the forward stays eager.
+    assert odd_runner._graphs == {}
+
+
+def _engine_tokens(cfg, weights, rope, prompts, graphs, max_batch):
+    pool = new_page_pool(cfg, n_pages=16, block_size=16, device="cuda", dtype=weights.embed.dtype)
+    engine = EngineCore(
+        partial(forward_paged, weights, cfg, rope),
+        partial(forward_paged_batch, weights, cfg, rope),
+        pool,
+        max_batch,
+        graphs=graphs,
+    )
+    got = {}
+    for i, prompt in enumerate(prompts):
+        engine.add_request(Request(str(i), prompt, max_new_tokens=4))
+        got[str(i)] = []
+    for _ in range(32):
+        outs = engine.step()
+        for out in outs:
+            if out.token_id is not None:
+                got[out.request_id].append(out.token_id)
+        stats = engine.stats()
+        if stats.requests_waiting == 0 and stats.requests_running == 0:
+            assert stats.blocks_free == stats.blocks_total
+            return got, engine._graphs
+    raise AssertionError("engine did not finish")
 
 
 def _step(weights, cfg, rope, seqs, graphs):

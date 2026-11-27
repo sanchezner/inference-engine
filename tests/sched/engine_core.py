@@ -38,6 +38,7 @@ def main():
     _chunked_prefill_matches_an_uncapped_run()
     _chunked_interleaving_conserves_pages()
     _rejects_bad_sampling()
+    _a_cpu_graph_flag_stays_eager()
     _greedy_still_matches_the_recurrence()
     _a_seed_matches_its_own_stream_beside_another()
     _preemption_keeps_the_sample_stream()
@@ -87,6 +88,13 @@ def _rejects_bad_requests():
         assert "growth_margin" in str(exc)
     else:
         raise AssertionError("a bool growth margin was accepted")
+
+    try:
+        _engine(_pool(1, 4), max_batch=1, graphs=1)
+    except ValueError as exc:
+        assert "graphs" in str(exc)
+    else:
+        raise AssertionError("graphs=1 was accepted")
 
     try:
         _engine(_pool(1, 4), max_batch=1, prefill_budget=0)
@@ -738,6 +746,23 @@ def _rejects_bad_sampling():
         raise AssertionError(f"accepted sampling params {kwargs}")
 
 
+def _a_cpu_graph_flag_stays_eager():
+    # The flag builds a runner, but a CPU pool never hands it to the stub forward.
+    reqs = [
+        Request("a", (1, 2, 3), max_new_tokens=4),
+        Request("b", (4, 5), max_new_tokens=3, stop_token_ids=(6,)),
+    ]
+    off = _run(reqs, pages=8, margin=1)
+    pool = _pool(8, 4)
+    engine = _engine(pool, max_batch=4, graphs=True)
+    assert engine._graphs is not None
+    for req in reqs:
+        engine.add_request(req)
+    assert _drain(engine) == off
+    assert engine._graphs._graphs == {}
+    _conserved(pool, engine)
+
+
 def _greedy_still_matches_the_recurrence():
     sampling = SamplingParams(temperature=0, top_k=2, top_p=0.2, seed=3)
     pool = _pool(16, 4)
@@ -846,11 +871,11 @@ class _Clock:
         return self.t
 
 
-def _engine(pool, max_batch, clock=None, max_waiting=256, growth_margin=1, prefill_budget=None):
+def _engine(pool, max_batch, clock=None, max_waiting=256, growth_margin=1, prefill_budget=None, graphs=False):
     return EngineCore(
         _forward_one, _forward_batch, pool, max_batch,
         clock=clock, max_waiting=max_waiting, growth_margin=growth_margin,
-        prefill_budget=prefill_budget,
+        prefill_budget=prefill_budget, graphs=graphs,
     )
 
 

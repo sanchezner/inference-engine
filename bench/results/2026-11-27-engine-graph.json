@@ -1,0 +1,396 @@
+{
+  "part": "engine-graph",
+  "date": "2026-11-27",
+  "host": "WSL2",
+  "command": "make bench-engine-graph",
+  "methodology": "Open-loop burst through EngineCore on CUDA bf16, greedy. A case is 128-token prompts, 32 new tokens, block size 16. Every request arrives at t=0. max_batch equals the case batch, so after the first step they decode together. Graphs off is the eager decode forward. Graphs on passes DecodeGraphs into that forward. The pool is one spare page per request past the final length, and at least 32 pages, so a table-width bucket is not clipped by a tiny pool and the run does not preempt. One warmup replay per mode is discarded. It also captures the graph: the first decode already spans nine pages, which buckets to 16, and the run never reaches a wider bucket. 5 timed replays follow on the same pool and the same runner. Decode tokens/s is batch / inter-token p50. The requests share each decode step, so that p50 is the step. p50 is nearest-rank over one replay. The reported value is the median of those p50s, with the min and max. The ceiling is decode_step_bytes at context 143, the cached length before the middle decode step, over the median copy in bench/results/2026-10-31-bandwidth.json. Context at the first decode is the prompt length; at the last it is the prompt plus the new tokens, minus one. The trace is the second step of a fresh burst after those replays: the first step prefills, the second only decodes. It is one engine step, with no extra timer sync inside the profiled region. Device-to-host copies are chrome events whose name contains DtoH. The intended copy is the one pageable read of the batch's token ids. Graphs off also copies once to pinned memory: eager decode checks that every new token landed in a reserved page, and that check reads a device bool. The graph path skips the check, because a replay cannot stop on the host. Each trace has one cudaDeviceSynchronize. It is on both paths and does not grow with the batch. A prefill token is read on its own, because finishing it frees a seat before the next admission. Clocks are not locked. The card also drives the display. Host is WSL2. HTTP is not in these numbers.",
+  "model": "HuggingFaceTB/SmolLM2-1.7B",
+  "model_revision": "effd688a12921b4cc83e3312b6feb579f70f9c71",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "block_size": 16,
+  "prompt_len": 128,
+  "max_tokens": 32,
+  "seed": 0,
+  "reps": 5,
+  "warmup_discarded": 1,
+  "bandwidth_source": "bench/results/2026-10-31-bandwidth.json",
+  "bandwidth_median_bytes_per_s": 378672307987.7489,
+  "environment": {
+    "host": "WSL2",
+    "python": "3.14.4",
+    "torch": "2.14.1+cu132",
+    "triton": "3.8.0",
+    "cuda_build": "13.2",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 3070",
+    "gpu_total_bytes": 8589279232,
+    "sm_count": 46,
+    "nsight_systems": true,
+    "nsight_compute": true,
+    "nvidia_smi": {
+      "ok": true,
+      "name": "NVIDIA GeForce RTX 3070",
+      "driver_version": "610.88",
+      "memory.total": "8192",
+      "pstate": "P2",
+      "clocks.sm": "1995",
+      "clocks.mem": "6801",
+      "clocks.max.sm": "2130",
+      "clocks.max.mem": "7001",
+      "power.draw": "170.64",
+      "utilization.gpu": "53"
+    },
+    "compute_apps": {
+      "ok": true,
+      "apps": [
+        "2690, [Not Found], [N/A]"
+      ]
+    },
+    "git": {
+      "ok": true,
+      "sha": "1ebe0499dfbc4a2beb1fbfd41f205b95ec875df2",
+      "dirty": true
+    }
+  },
+  "nvidia_smi_under_load": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1980",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "135.97",
+    "utilization.gpu": "72"
+  },
+  "nvidia_smi_after": {
+    "ok": true,
+    "name": "NVIDIA GeForce RTX 3070",
+    "driver_version": "610.88",
+    "memory.total": "8192",
+    "pstate": "P2",
+    "clocks.sm": "1995",
+    "clocks.mem": "6801",
+    "clocks.max.sm": "2130",
+    "clocks.max.mem": "7001",
+    "power.draw": "170.64",
+    "utilization.gpu": "53"
+  },
+  "cases": [
+    {
+      "batch": 1,
+      "pages": 32,
+      "context_start": 128,
+      "context_mid": 143,
+      "context_end": 159,
+      "ceiling_tokens_per_s": 109.73236012705254,
+      "graphs_captured": 1,
+      "tokens_equal": true,
+      "off": {
+        "itl_p50_s": {
+          "median": 0.026943271000163804,
+          "min": 0.024289467000016884,
+          "max": 0.03363715199998296
+        },
+        "itl_p99_s": {
+          "median": 0.03965784000001804,
+          "min": 0.03529958399985844,
+          "max": 0.06819478700003856
+        },
+        "ttft_p50_s": {
+          "median": 0.017643071000065902,
+          "min": 0.016141485999924043,
+          "max": 0.024613546999944447
+        },
+        "elapsed_s": {
+          "median": 0.9058602229999906,
+          "min": 0.7983015739998791,
+          "max": 1.0007396100002097
+        },
+        "decode_tokens_per_s": 37.11501843981454,
+        "runs": [
+          {
+            "itl_p50_s": 0.026943271000163804,
+            "itl_p99_s": 0.040663875000063854,
+            "ttft_p50_s": 0.016228780999881565,
+            "elapsed_s": 0.9058602229999906,
+            "decode_tokens_per_s": 37.11501843981454
+          },
+          {
+            "itl_p50_s": 0.024289467000016884,
+            "itl_p99_s": 0.03965784000001804,
+            "ttft_p50_s": 0.024613546999944447,
+            "elapsed_s": 0.7983015739998791,
+            "decode_tokens_per_s": 41.170108837682804
+          },
+          {
+            "itl_p50_s": 0.025985086999980922,
+            "itl_p99_s": 0.03529958399985844,
+            "ttft_p50_s": 0.01906182099992293,
+            "elapsed_s": 0.809991183999955,
+            "decode_tokens_per_s": 38.48361177319646
+          },
+          {
+            "itl_p50_s": 0.03363715199998296,
+            "itl_p99_s": 0.06819478700003856,
+            "ttft_p50_s": 0.016141485999924043,
+            "elapsed_s": 1.0007396100002097,
+            "decode_tokens_per_s": 29.729032945491536
+          },
+          {
+            "itl_p50_s": 0.033627193000029365,
+            "itl_p99_s": 0.03875338200009537,
+            "ttft_p50_s": 0.017643071000065902,
+            "elapsed_s": 0.9853229010000177,
+            "decode_tokens_per_s": 29.737837469786037
+          }
+        ],
+        "fraction_of_ceiling": 0.3382322078632163
+      },
+      "on": {
+        "itl_p50_s": {
+          "median": 0.010677731999976459,
+          "min": 0.010344217000010758,
+          "max": 0.010692981999909534
+        },
+        "itl_p99_s": {
+          "median": 0.011548869999842282,
+          "min": 0.011340392999954929,
+          "max": 0.01349987699995836
+        },
+        "ttft_p50_s": {
+          "median": 0.027256588000000193,
+          "min": 0.018358730000045398,
+          "max": 0.028141543999936403
+        },
+        "elapsed_s": {
+          "median": 0.35752519599986954,
+          "min": 0.35108329300010155,
+          "max": 0.3611666479998803
+        },
+        "decode_tokens_per_s": 93.65284687817645,
+        "runs": [
+          {
+            "itl_p50_s": 0.010692981999909534,
+            "itl_p99_s": 0.012024137999787854,
+            "ttft_p50_s": 0.028141543999936403,
+            "elapsed_s": 0.3611666479998803,
+            "decode_tokens_per_s": 93.51928208692956
+          },
+          {
+            "itl_p50_s": 0.010641914999951041,
+            "itl_p99_s": 0.011395124000046053,
+            "ttft_p50_s": 0.027831921999904807,
+            "elapsed_s": 0.35752519599986954,
+            "decode_tokens_per_s": 93.96804992377787
+          },
+          {
+            "itl_p50_s": 0.010344217000010758,
+            "itl_p99_s": 0.01349987699995836,
+            "ttft_p50_s": 0.02221859700011919,
+            "elapsed_s": 0.35372878199996194,
+            "decode_tokens_per_s": 96.67237259223776
+          },
+          {
+            "itl_p50_s": 0.010677731999976459,
+            "itl_p99_s": 0.011548869999842282,
+            "ttft_p50_s": 0.027256588000000193,
+            "elapsed_s": 0.35807427700001426,
+            "decode_tokens_per_s": 93.65284687817645
+          },
+          {
+            "itl_p50_s": 0.010679827000103614,
+            "itl_p99_s": 0.011340392999954929,
+            "ttft_p50_s": 0.018358730000045398,
+            "elapsed_s": 0.35108329300010155,
+            "decode_tokens_per_s": 93.63447553881707
+          }
+        ],
+        "fraction_of_ceiling": 0.8534660766408506
+      },
+      "trace": {
+        "off": {
+          "syncs": {
+            "aten::item": 1,
+            "cudaDeviceSynchronize": 1,
+            "cudaStreamSynchronize": 4
+          },
+          "device_to_host": {
+            "Memcpy DtoH (Device -> Pageable)": 1,
+            "Memcpy DtoH (Device -> Pinned)": 1
+          },
+          "device_to_host_count": 2
+        },
+        "on": {
+          "syncs": {
+            "cudaDeviceSynchronize": 1,
+            "cudaStreamSynchronize": 2
+          },
+          "device_to_host": {
+            "Memcpy DtoH (Device -> Pageable)": 1
+          },
+          "device_to_host_count": 1
+        }
+      }
+    },
+    {
+      "batch": 8,
+      "pages": 88,
+      "context_start": 128,
+      "context_mid": 143,
+      "context_end": 159,
+      "ceiling_tokens_per_s": 830.4888665116754,
+      "graphs_captured": 1,
+      "tokens_equal": true,
+      "off": {
+        "itl_p50_s": {
+          "median": 0.027536116999954174,
+          "min": 0.02095202900000004,
+          "max": 0.0337256029999935
+        },
+        "itl_p99_s": {
+          "median": 0.15196287799994934,
+          "min": 0.13078899499987529,
+          "max": 0.16066385599992827
+        },
+        "ttft_p50_s": {
+          "median": 0.09122815799992168,
+          "min": 0.07347691399991163,
+          "max": 0.11127936899993074
+        },
+        "elapsed_s": {
+          "median": 1.0251158050000413,
+          "min": 0.9672853510001005,
+          "max": 1.0690530300000773
+        },
+        "decode_tokens_per_s": 290.52752790138544,
+        "runs": [
+          {
+            "itl_p50_s": 0.028364245999910054,
+            "itl_p99_s": 0.15196287799994934,
+            "ttft_p50_s": 0.07484656199994788,
+            "elapsed_s": 1.0364060229999268,
+            "decode_tokens_per_s": 282.04521988793107
+          },
+          {
+            "itl_p50_s": 0.026369752999926277,
+            "itl_p99_s": 0.16066385599992827,
+            "ttft_p50_s": 0.11127936899993074,
+            "elapsed_s": 0.9834066840001014,
+            "decode_tokens_per_s": 303.37788905426476
+          },
+          {
+            "itl_p50_s": 0.027536116999954174,
+            "itl_p99_s": 0.13078899499987529,
+            "ttft_p50_s": 0.09873362799999086,
+            "elapsed_s": 0.9672853510001005,
+            "decode_tokens_per_s": 290.52752790138544
+          },
+          {
+            "itl_p50_s": 0.02095202900000004,
+            "itl_p99_s": 0.15987115600000834,
+            "ttft_p50_s": 0.09122815799992168,
+            "elapsed_s": 1.0251158050000413,
+            "decode_tokens_per_s": 381.8245956036041
+          },
+          {
+            "itl_p50_s": 0.0337256029999935,
+            "itl_p99_s": 0.14784554100015157,
+            "ttft_p50_s": 0.07347691399991163,
+            "elapsed_s": 1.0690530300000773,
+            "decode_tokens_per_s": 237.20850891832956
+          }
+        ],
+        "fraction_of_ceiling": 0.3498271194431492
+      },
+      "on": {
+        "itl_p50_s": {
+          "median": 0.010974287000180993,
+          "min": 0.0109420979999868,
+          "max": 0.011913208000123632
+        },
+        "itl_p99_s": {
+          "median": 0.12176698999996916,
+          "min": 0.10479782499987778,
+          "max": 0.19602813100004823
+        },
+        "ttft_p50_s": {
+          "median": 0.08954358000005413,
+          "min": 0.07490772200003448,
+          "max": 0.11709645700011606
+        },
+        "elapsed_s": {
+          "median": 0.5471781460000784,
+          "min": 0.4907927079998444,
+          "max": 0.639895142999876
+        },
+        "decode_tokens_per_s": 728.9767435340501,
+        "runs": [
+          {
+            "itl_p50_s": 0.01168753399997513,
+            "itl_p99_s": 0.19602813100004823,
+            "ttft_p50_s": 0.11709645700011606,
+            "elapsed_s": 0.639895142999876,
+            "decode_tokens_per_s": 684.4899873674825
+          },
+          {
+            "itl_p50_s": 0.011913208000123632,
+            "itl_p99_s": 0.12176698999996916,
+            "ttft_p50_s": 0.10100526900009754,
+            "elapsed_s": 0.5471781460000784,
+            "decode_tokens_per_s": 671.5235728207699
+          },
+          {
+            "itl_p50_s": 0.010953879999988203,
+            "itl_p99_s": 0.1930119809999269,
+            "ttft_p50_s": 0.08954358000005413,
+            "elapsed_s": 0.5812697999999727,
+            "decode_tokens_per_s": 730.334821999932
+          },
+          {
+            "itl_p50_s": 0.0109420979999868,
+            "itl_p99_s": 0.10522500299998683,
+            "ttft_p50_s": 0.07490772200003448,
+            "elapsed_s": 0.4907927079998444,
+            "decode_tokens_per_s": 731.1212164257395
+          },
+          {
+            "itl_p50_s": 0.010974287000180993,
+            "itl_p99_s": 0.10479782499987778,
+            "ttft_p50_s": 0.07847601899993606,
+            "elapsed_s": 0.4941290560000198,
+            "decode_tokens_per_s": 728.9767435340501
+          }
+        ],
+        "fraction_of_ceiling": 0.8777682313743599
+      },
+      "trace": {
+        "off": {
+          "syncs": {
+            "aten::item": 1,
+            "cudaDeviceSynchronize": 1,
+            "cudaStreamSynchronize": 4
+          },
+          "device_to_host": {
+            "Memcpy DtoH (Device -> Pageable)": 1,
+            "Memcpy DtoH (Device -> Pinned)": 1
+          },
+          "device_to_host_count": 2
+        },
+        "on": {
+          "syncs": {
+            "cudaDeviceSynchronize": 1,
+            "cudaStreamSynchronize": 2
+          },
+          "device_to_host": {
+            "Memcpy DtoH (Device -> Pageable)": 1
+          },
+          "device_to_host_count": 1
+        }
+      }
+    }
+  ]
+}

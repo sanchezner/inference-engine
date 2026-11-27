@@ -6,15 +6,34 @@ from engine.sched.request import SamplingParams
 
 
 def sample_token(logits, params: SamplingParams, generator) -> int:
+    # One row. A decode step reads every row together in sample_batch.
+    return int(_token(logits, params, generator).item())
+
+
+def sample_batch(logits, params, generators) -> list[int]:
+    # One read for every row. A per-row .item() would pause the GPU once per sequence.
+    if logits.ndim != 2 or logits.shape[0] < 1:
+        raise ValueError(f"sample_batch expected a [batch, vocab] tensor, got shape {tuple(logits.shape)}")
+    n = logits.shape[0]
+    if len(params) != n or len(generators) != n:
+        raise ValueError(f"sample_batch got {n} rows, {len(params)} param sets, and {len(generators)} generators")
+    if all(item.temperature == 0.0 for item in params):
+        chosen = torch.argmax(logits, dim=-1)
+    else:
+        # Each row keeps its own generator. One shared draw would mix their streams.
+        chosen = torch.stack([_token(logits[i], params[i], generators[i]) for i in range(n)])
+    return [int(token) for token in chosen.tolist()]
+
+
+def _token(logits, params: SamplingParams, generator):
     row = _row(logits)
     if params.temperature == 0.0:
-        return int(torch.argmax(row).item())
+        return torch.argmax(row)
     if generator is None:
         raise RuntimeError("a non-zero temperature needs a generator")
     scores = _restrict(row.float() / params.temperature, params.top_k, params.top_p)
     probs = torch.softmax(scores, dim=-1)
-    drawn = torch.multinomial(probs, num_samples=1, generator=generator)
-    return int(drawn.item())
+    return torch.multinomial(probs, num_samples=1, generator=generator).reshape(())
 
 
 def ensure_generator(params: SamplingParams, generator, device):
